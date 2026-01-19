@@ -1231,6 +1231,32 @@ class MHATokenToKVPoolFP4(MHATokenToKVPool):
         del self.k_scale_buffer
         del self.v_scale_buffer
 
+    def get_raw_kv_buffer(self, layer_id: int):
+        """
+        Get raw quantized KV buffer with scale factors for FP4.
+        
+        Returns a dict containing:
+        - k_buffer: Raw quantized K buffer [total_slots, num_heads, head_dim//2]
+        - v_buffer: Raw quantized V buffer
+        - k_scales_zeros: K scale factors [total_slots, (num_heads * head_dim) // 16] (for fp4)
+        - v_scales_zeros: V scale factors (for fp4)
+        - dtype: KV cache dtype string
+        """
+        if self.layer_transfer_counter is not None:
+            self.layer_transfer_counter.wait_until(layer_id - self.start_layer)
+
+        result = {
+            "k_buffer": self.k_buffer[layer_id - self.start_layer],
+            "v_buffer": self.v_buffer[layer_id - self.start_layer],
+            "dtype": self.dtype,
+        }
+
+        # For fp4, return scale buffers instead of scales_zeros
+        result["k_scales_zeros"] = self.k_scale_buffer[layer_id - self.start_layer]
+        result["v_scales_zeros"] = self.v_scale_buffer[layer_id - self.start_layer]
+
+        return result
+
     def _get_key_buffer(self, layer_id: int):
         # for internal use of referencing
         if self.store_dtype != self.dtype:

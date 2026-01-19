@@ -855,12 +855,16 @@ class FlashAttentionBackend(AttentionBackend):
         # Use Flash Attention for prefill
         if not self.use_mla:
             # Do multi-head attention
-            if self.kv_cache_dtype_str in ("int4", "int8"):
+            if self.kv_cache_dtype_str in ("int4", "int8", "fp4_e2m1"):
                 kv_data = forward_batch.token_to_kv_pool.get_raw_kv_buffer(
                     layer.layer_id
                 )
 
                 out_size = metadata.kv_flatten_size
+                if self.kv_cache_dtype_str == "fp4_e2m1":
+                    quant_policy = "fp4"
+                else:
+                    quant_policy = 4 if self.kv_cache_dtype_str == "int4" else 8
                 flatten_k, flatten_v = flatten_kv_cache_sglang(
                     k_cache=kv_data["k_buffer"],
                     v_cache=kv_data["v_buffer"],
@@ -873,7 +877,7 @@ class FlashAttentionBackend(AttentionBackend):
                     num_heads=layer.tp_k_head_num,
                     head_dim_k=layer.head_dim,
                     head_dim_v=layer.head_dim,  # Assuming same for simplicity
-                    quant_policy=4 if self.kv_cache_dtype_str == "int4" else 8,
+                    quant_policy=quant_policy,
                     output_dtype=q.dtype,
                     max_seq_len_k=max_seq_len_k,
                     out_size=out_size,
@@ -1187,6 +1191,81 @@ class FlashAttentionBackend(AttentionBackend):
                 k_rope = k_rope.to(self.kv_cache_dtype) if k_rope is not None else None
         if not self.use_mla:
             # Do multi-head attention
+            if self.kv_cache_dtype_str in ("int4", "int8", "fp4_e2m1"):
+                # For quantized cache, use flatten_kv_cache and flash_attn_varlen_func
+                kv_data = forward_batch.token_to_kv_pool.get_raw_kv_buffer(
+                    layer.layer_id
+                )
+
+                page_table = metadata.page_table
+                if is_swa_layer and self.use_sliding_window_kv_pool:
+                    if metadata.swa_page_table is not None:
+                        page_table = metadata.swa_page_table
+                    else:
+                        page_table = (
+                            self.token_to_kv_pool.translate_loc_from_full_to_swa(
+                                metadata.page_table
+                            )
+                        )
+                cache_seqlens = metadata.cache_seqlens_int32
+                cu_seqlens_k = metadata.cu_seqlens_k
+                max_seq_len_k = metadata.max_seq_len_k
+                # For decode, max_seqlen_q is 1 (each query has length 1)
+                max_seqlen_q = metadata.max_seq_len_q
+                # For decode, compute out_size from cu_seqlens_k (last element is total)
+                if hasattr(metadata, 'kv_flatten_size') and metadata.kv_flatten_size > 0:
+                    out_size = metadata.kv_flatten_size
+                else:
+                    out_size = cu_seqlens_k[-1].item() if cu_seqlens_k is not None else cache_seqlens.sum().item()
+
+                if self.kv_cache_dtype_str == "fp4_e2m1":
+                    quant_policy = "fp4"
+                else:
+                    quant_policy = 4 if self.kv_cache_dtype_str == "int4" else 8
+
+                flatten_k, flatten_v = flatten_kv_cache_sglang(
+                    k_cache=kv_data["k_buffer"],
+                    v_cache=kv_data["v_buffer"],
+                    k_scales_zeros=kv_data["k_scales_zeros"],
+                    v_scales_zeros=kv_data["v_scales_zeros"],
+                    page_table=page_table,
+                    cache_seqlens=cache_seqlens,
+                    cu_seqlens_k=cu_seqlens_k if not use_local_attn else None,
+                    page_size=self.page_size,
+                    num_heads=layer.tp_k_head_num,
+                    head_dim_k=layer.head_dim,
+                    head_dim_v=layer.head_dim,
+                    quant_policy=quant_policy,
+                    output_dtype=q.dtype,
+                    max_seq_len_k=max_seq_len_k,
+                    out_size=out_size,
+                )
+
+                q_reshaped = q.contiguous().view(-1, layer.tp_q_head_num, layer.head_dim)
+                result = flash_attn_varlen_func(
+                    q=q_reshaped,
+                    k=flatten_k,
+                    v=flatten_v,
+                    cu_seqlens_q=metadata.cu_seqlens_q,
+                    cu_seqlens_k=cu_seqlens_k if not use_local_attn else None,
+                    max_seqlen_q=max_seqlen_q,
+                    max_seqlen_k=max_seq_len_k,
+                    softmax_scale=layer.scaling,
+                    causal=False if use_cascade_attn else causal,
+                    window_size=window_size,
+                    softcap=layer.logit_cap,
+                    return_softmax_lse=use_cascade_attn,
+                    **kwargs,
+                )
+                if use_cascade_attn:
+                    o, softmax_lse, *rest = result
+                    # For cascade attention, we still need to handle the expand part
+                    # This is a simplified version - may need more work
+                    o = o.view(-1, layer.tp_q_head_num * layer.head_dim)
+                    return o
+                else:
+                    o = result.view(-1, layer.tp_q_head_num * layer.head_dim)
+                    return o
 
             key_cache, value_cache = forward_batch.token_to_kv_pool.get_kv_buffer(
                 layer.layer_id

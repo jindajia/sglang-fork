@@ -108,7 +108,7 @@ class TritonAttnBackend(AttentionBackend):
             ]
         if (
             hasattr(model_runner.token_to_kv_pool, "dtype")
-            and model_runner.token_to_kv_pool.dtype == "int4"
+            and model_runner.token_to_kv_pool.dtype in ("int4", torch.float4_e2m1fn_x2)
         ):
             self.v_head_dim = self.v_head_dim * 2
         self.max_context_len = model_runner.model_config.context_len
