@@ -1,5 +1,5 @@
 """
-Triton kernels for efficient KV cache quantization (INT4/INT8).
+Triton kernels for efficient KV cache quantization (INT4/INT8/FP4).
 """
 
 import torch
@@ -482,6 +482,55 @@ def dequantize_kv_int8_triton(
     )
 
     return output
+
+
+def quantized_set_kv_fp4_torch(
+    cache_k: torch.Tensor,
+    cache_v: torch.Tensor,
+    loc: torch.Tensor,
+    k_cache_buffer: torch.Tensor,
+    v_cache_buffer: torch.Tensor,
+    k_scale_buffer: torch.Tensor,
+    v_scale_buffer: torch.Tensor,
+):
+    """
+    Quantize K and V caches to FP4 and write directly to cache buffers.
+    
+    Uses KVFP4QuantizeUtil for quantization, matching the interface of int4/int8 functions.
+
+    Args:
+        cache_k: Input K states [num_tokens, num_heads, head_dim]
+        cache_v: Input V states [num_tokens, num_heads, head_dim]
+        loc: Cache location indices [num_tokens]
+        k_cache_buffer: Output K cache [cache_size, num_heads, head_dim//2] (packed fp4)
+        v_cache_buffer: Output V cache [cache_size, num_heads, head_dim//2] (packed fp4)
+        k_scale_buffer: K scale factors [cache_size, (num_heads * head_dim) // 16] (uint8)
+        v_scale_buffer: V scale factors [cache_size, (num_heads * head_dim) // 16] (uint8)
+
+    Returns:
+        None (writes directly to buffers)
+    """
+    from sglang.srt.layers.quantization.kvfp4_tensor import KVFP4QuantizeUtil
+
+    num_tokens, num_heads, head_dim = cache_k.shape
+    assert head_dim % 16 == 0, f"head_dim must be divisible by 16 for FP4, got {head_dim}"
+    
+    # Quantize K cache
+    # Reshape to [num_tokens, num_heads, head_dim] for batched_quantize
+    k_quantized, k_scales = KVFP4QuantizeUtil.batched_quantize(cache_k)
+    # k_quantized: [num_tokens, num_heads, head_dim//2]
+    # k_scales: [num_tokens, num_heads * head_dim // 16]
+    
+    # Quantize V cache
+    v_quantized, v_scales = KVFP4QuantizeUtil.batched_quantize(cache_v)
+    
+    # Write to cache buffers at specified locations
+    k_cache_buffer[loc] = k_quantized
+    v_cache_buffer[loc] = v_quantized
+    
+    # Write scale factors
+    k_scale_buffer[loc] = k_scales
+    v_scale_buffer[loc] = v_scales
 
 
 def dequantize_kv_int4_triton(

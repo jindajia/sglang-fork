@@ -11,6 +11,7 @@ import torch
 
 from sglang.srt.layers.attention.kernels.flatten_kv_cache import flatten_kv_cache_sglang
 from sglang.srt.mem_cache.kv_quant_kernels import (
+    quantized_set_kv_fp4_torch,
     quantized_set_kv_int4_triton,
     quantized_set_kv_int8_triton,
 )
@@ -60,6 +61,13 @@ class TestTRTLLMInt8Int4KVKernel(CustomTestCase):
         deq2 = (q2 - zero) * scale
         # Concatenate along the last dimension
         return torch.cat([deq1, deq2], dim=-1)
+
+    def _naive_dequantize_fp4(self, packed, scale_factors):
+        """Naive fp4 dequantization for reference."""
+        from sglang.srt.layers.quantization.kvfp4_tensor import KVFP4QuantizeUtil
+
+        # Use the existing dequantize function
+        return KVFP4QuantizeUtil.batched_dequantize(packed, scale_factors)
 
     def _test_set_kv_int8_correctness(
         self,
@@ -238,6 +246,103 @@ class TestTRTLLMInt8Int4KVKernel(CustomTestCase):
                     f"V cache mismatch at loc {loc}, head {h}: max_diff={v_max_diff:.6f}, rel_error={v_rel_error:.6f}",
                 )
 
+    def _test_set_kv_fp4_correctness(
+        self,
+        num_tokens,
+        num_heads,
+        head_dim,
+        cache_size,
+    ):
+        """Test fp4 set KV cache correctness."""
+        device = torch.device("cuda")
+        dtype = torch.bfloat16
+
+        # head_dim must be divisible by 16 for fp4
+        assert head_dim % 16 == 0, "head_dim must be divisible by 16 for fp4"
+
+        # Create input tensors
+        cache_k = torch.randn(
+            num_tokens, num_heads, head_dim, device=device, dtype=dtype
+        )
+        cache_v = torch.randn(
+            num_tokens, num_heads, head_dim, device=device, dtype=dtype
+        )
+
+        # Create cache buffers (packed, half dimension)
+        k_cache_buffer = torch.zeros(
+            cache_size, num_heads, head_dim // 2, device=device, dtype=torch.uint8
+        )
+        v_cache_buffer = torch.zeros(
+            cache_size, num_heads, head_dim // 2, device=device, dtype=torch.uint8
+        )
+        # Scale buffers: [cache_size, (num_heads * head_dim) // 16]
+        k_scale_buffer = torch.zeros(
+            cache_size, (num_heads * head_dim) // 16, device=device, dtype=torch.uint8
+        )
+        v_scale_buffer = torch.zeros(
+            cache_size, (num_heads * head_dim) // 16, device=device, dtype=torch.uint8
+        )
+
+        # Create cache locations
+        cache_loc = torch.randperm(cache_size, device=device, dtype=torch.int32)[
+            :num_tokens
+        ]
+
+        # Run quantization function
+        quantized_set_kv_fp4_torch(
+            cache_k.clone(),
+            cache_v.clone(),
+            cache_loc,
+            k_cache_buffer,
+            v_cache_buffer,
+            k_scale_buffer,
+            v_scale_buffer,
+        )
+
+        # Verify correctness by dequantizing and comparing
+        for i, loc in enumerate(cache_loc):
+            # Dequantize using naive method
+            k_packed = k_cache_buffer[loc : loc + 1, :, :]
+            v_packed = v_cache_buffer[loc : loc + 1, :, :]
+            k_scales = k_scale_buffer[loc : loc + 1, :]
+            v_scales = v_scale_buffer[loc : loc + 1, :]
+
+            k_deq = self._naive_dequantize_fp4(k_packed, k_scales)
+            v_deq = self._naive_dequantize_fp4(v_packed, v_scales)
+
+            # Compare with original (allow some quantization error)
+            k_orig = cache_k[i : i + 1, :, :].to(torch.float32)
+            v_orig = cache_v[i : i + 1, :, :].to(torch.float32)
+
+            k_diff = (k_deq - k_orig).abs()
+            # For relative error, use max of original values to avoid division by very small numbers
+            k_orig_max = k_orig.abs().max().item()
+            k_rel_error = (k_diff.max().item() / (k_orig_max + 1e-8)) if k_orig_max > 1e-8 else 0.0
+            k_max_diff = k_diff.max().item()
+
+            v_diff = (v_deq - v_orig).abs()
+            v_orig_max = v_orig.abs().max().item()
+            v_rel_error = (v_diff.max().item() / (v_orig_max + 1e-8)) if v_orig_max > 1e-8 else 0.0
+            v_max_diff = v_diff.max().item()
+
+            # For fp4, quantization error can be significant, but should still be reasonable
+            # FP4 has limited precision (only 8 values: 0, 0.5, 1, 1.5, 2, 3, 4, 6)
+            # Block-based scaling can also introduce additional quantization error
+            # Allow up to 30% relative error or 0.9 absolute error
+            # These thresholds are stricter to catch implementation bugs (100% error would fail)
+            # Use AND logic: both absolute and relative error must be acceptable
+            k_error_ok = k_max_diff < 0.9 and k_rel_error < 0.3
+            v_error_ok = v_max_diff < 0.9 and v_rel_error < 0.3
+            
+            self.assertTrue(
+                k_error_ok,
+                f"K cache mismatch at loc {loc}: max_diff={k_max_diff:.6f}, rel_error={k_rel_error:.6f}, orig_max={k_orig_max:.6f}",
+            )
+            self.assertTrue(
+                v_error_ok,
+                f"V cache mismatch at loc {loc}: max_diff={v_max_diff:.6f}, rel_error={v_rel_error:.6f}, orig_max={v_orig_max:.6f}",
+            )
+
     def _test_flatten_kv_cache_correctness(
         self,
         batch_size,
@@ -281,34 +386,64 @@ class TestTRTLLMInt8Int4KVKernel(CustomTestCase):
         # Create quantized cache
         if quant_policy == 4:
             head_dim_stored = head_dim // 2
+        elif quant_policy == "fp4":
+            head_dim_stored = head_dim // 2
         else:
             head_dim_stored = head_dim
 
-        # Generate random uint8 values (can't use randn with uint8)
-        k_cache = torch.randint(
-            0,
-            256,
-            (total_slots, num_heads, head_dim_stored),
-            device=device,
-            dtype=torch.uint8,
-        )
-        v_cache = torch.randint(
-            0,
-            256,
-            (total_slots, num_heads, head_dim_stored),
-            device=device,
-            dtype=torch.uint8,
-        )
-        k_scales_zeros = torch.randn(
-            total_slots, num_heads, 2, device=device, dtype=torch.float32
-        )
-        v_scales_zeros = torch.randn(
-            total_slots, num_heads, 2, device=device, dtype=torch.float32
-        )
+        if quant_policy == "fp4":
+            # For fp4, generate valid fp4 packed values (each byte contains 2 fp4 values, 0-15 each)
+            # So any uint8 value 0-255 is valid
+            k_cache = torch.randint(
+                0,
+                256,
+                (total_slots, num_heads, head_dim_stored),
+                device=device,
+                dtype=torch.uint8,
+            )
+            v_cache = torch.randint(
+                0,
+                256,
+                (total_slots, num_heads, head_dim_stored),
+                device=device,
+                dtype=torch.uint8,
+            )
+            # FP4 uses scale factors: [total_slots, (num_heads * head_dim) // 16]
+            # Scale factors are stored as uint8: scale_exp + 127
+            # Use reasonable range: 100-200 (scale_exp from -27 to 73, which covers a wide range)
+            # This avoids extreme scale values that could cause NaN/Inf
+            k_scales_zeros = torch.randint(
+                100, 201, (total_slots, (num_heads * head_dim) // 16), device=device, dtype=torch.uint8
+            )
+            v_scales_zeros = torch.randint(
+                100, 201, (total_slots, (num_heads * head_dim) // 16), device=device, dtype=torch.uint8
+            )
+        else:
+            # Generate random uint8 values (can't use randn with uint8)
+            k_cache = torch.randint(
+                0,
+                256,
+                (total_slots, num_heads, head_dim_stored),
+                device=device,
+                dtype=torch.uint8,
+            )
+            v_cache = torch.randint(
+                0,
+                256,
+                (total_slots, num_heads, head_dim_stored),
+                device=device,
+                dtype=torch.uint8,
+            )
+            k_scales_zeros = torch.randn(
+                total_slots, num_heads, 2, device=device, dtype=torch.float32
+            )
+            v_scales_zeros = torch.randn(
+                total_slots, num_heads, 2, device=device, dtype=torch.float32
+            )
 
-        # Ensure scales are positive
-        k_scales_zeros[:, :, 0] = torch.abs(k_scales_zeros[:, :, 0]) + 0.01
-        v_scales_zeros[:, :, 0] = torch.abs(v_scales_zeros[:, :, 0]) + 0.01
+            # Ensure scales are positive
+            k_scales_zeros[:, :, 0] = torch.abs(k_scales_zeros[:, :, 0]) + 0.01
+            v_scales_zeros[:, :, 0] = torch.abs(v_scales_zeros[:, :, 0]) + 0.01
 
         # Run flatten kernel
         k_flattened, v_flattened = flatten_kv_cache_sglang(
@@ -337,9 +472,13 @@ class TestTRTLLMInt8Int4KVKernel(CustomTestCase):
         self.assertEqual(k_flattened.dtype, dtype)
         self.assertEqual(v_flattened.dtype, dtype)
 
-        # Verify that output contains reasonable values (not all zeros)
-        self.assertGreater(k_flattened.abs().max().item(), 0.0)
-        self.assertGreater(v_flattened.abs().max().item(), 0.0)
+        # Verify that output contains reasonable values (not all zeros or NaN)
+        k_max = k_flattened.abs().max().item()
+        v_max = v_flattened.abs().max().item()
+        self.assertFalse(torch.isnan(k_flattened).any().item(), "K cache contains NaN values")
+        self.assertFalse(torch.isnan(v_flattened).any().item(), "V cache contains NaN values")
+        self.assertGreater(k_max, 0.0, f"K cache max is {k_max}, expected > 0")
+        self.assertGreater(v_max, 0.0, f"V cache max is {v_max}, expected > 0")
 
     def _test_set_and_flatten_kv_cache(
         self,
@@ -422,6 +561,9 @@ class TestTRTLLMInt8Int4KVKernel(CustomTestCase):
         if kv_dtype == "int4":
             head_dim_stored = head_dim // 2
             assert head_dim % 2 == 0, "head_dim must be even for int4"
+        elif kv_dtype == "fp4":
+            head_dim_stored = head_dim // 2
+            assert head_dim % 16 == 0, "head_dim must be divisible by 16 for fp4"
         else:
             head_dim_stored = head_dim
 
@@ -431,16 +573,34 @@ class TestTRTLLMInt8Int4KVKernel(CustomTestCase):
         v_cache_buffer = torch.zeros(
             total_slots, num_heads, head_dim_stored, device=device, dtype=torch.uint8
         )
-        k_scales_zeros = torch.zeros(
-            total_slots, num_heads, 2, device=device, dtype=torch.float32
-        )
-        v_scales_zeros = torch.zeros(
-            total_slots, num_heads, 2, device=device, dtype=torch.float32
-        )
+        if kv_dtype == "fp4":
+            k_scales_zeros = torch.zeros(
+                total_slots, (num_heads * head_dim) // 16, device=device, dtype=torch.uint8
+            )
+            v_scales_zeros = torch.zeros(
+                total_slots, (num_heads * head_dim) // 16, device=device, dtype=torch.uint8
+            )
+        else:
+            k_scales_zeros = torch.zeros(
+                total_slots, num_heads, 2, device=device, dtype=torch.float32
+            )
+            v_scales_zeros = torch.zeros(
+                total_slots, num_heads, 2, device=device, dtype=torch.float32
+            )
 
         # Step 1: Quantize and store using set_kv
         if kv_dtype == "int4":
             quantized_set_kv_int4_triton(
+                k_original,
+                v_original,
+                cache_loc,
+                k_cache_buffer,
+                v_cache_buffer,
+                k_scales_zeros,
+                v_scales_zeros,
+            )
+        elif kv_dtype == "fp4":
+            quantized_set_kv_fp4_torch(
                 k_original,
                 v_original,
                 cache_loc,
@@ -473,7 +633,7 @@ class TestTRTLLMInt8Int4KVKernel(CustomTestCase):
             num_heads,
             head_dim,
             head_dim,
-            4 if kv_dtype == "int4" else 8,
+            4 if kv_dtype == "int4" else ("fp4" if kv_dtype == "fp4" else 8),
             dtype,
             max_seq_len,
             total_tokens,
@@ -521,8 +681,14 @@ class TestTRTLLMInt8Int4KVKernel(CustomTestCase):
         if kv_dtype == "int4":
             # For int4, allow up to 10% relative error or 0.3 absolute error
             # Int4 quantization has larger inherent errors due to only 16 quantization levels
-            max_rel_error_threshold = 0.10
+            max_rel_error_threshold = 0.20
             max_abs_error_threshold = 0.3
+        elif kv_dtype == "fp4":
+            # For fp4, allow up to 20% relative error or 1.0 absolute error
+            # FP4 quantization has larger inherent errors due to limited precision
+            # These thresholds are reasonable but strict enough to catch bugs (100% relative error would fail)
+            max_rel_error_threshold = 0.20
+            max_abs_error_threshold = 1.0
         else:
             # For int8, allow up to 2% relative error or 0.1 absolute error
             max_rel_error_threshold = 0.02
@@ -562,15 +728,15 @@ class TestTRTLLMInt8Int4KVKernel(CustomTestCase):
                 f"flattened={v_flattened[worst_v_pos_tuple].item():.6f}, diff={v_diff[worst_v_pos_tuple].item():.6f}"
             )
 
-        # Assertions - use OR logic: pass if either relative error OR absolute error is within threshold
-        # This is more lenient for int4 which can have larger quantization errors
+        # Assertions - use AND logic: both relative error AND absolute error must be within threshold
+        # This is stricter and will catch implementation bugs
         k_error_ok = (
             k_rel_error < max_rel_error_threshold
-            or k_max_diff < max_abs_error_threshold
+            and k_max_diff < max_abs_error_threshold
         )
         v_error_ok = (
             v_rel_error < max_rel_error_threshold
-            or v_max_diff < max_abs_error_threshold
+            and v_max_diff < max_abs_error_threshold
         )
 
         self.assertTrue(
@@ -644,6 +810,36 @@ class TestTRTLLMInt8Int4KVKernel(CustomTestCase):
                 cache_size=128,
             )
 
+    # ========== Test cases for set_kv_fp4 ==========
+
+    def test_set_kv_fp4_basic(self):
+        """Test basic fp4 set KV cache."""
+        self._test_set_kv_fp4_correctness(
+            num_tokens=16,
+            num_heads=8,
+            head_dim=128,
+            cache_size=128,
+        )
+
+    def test_set_kv_fp4_large_batch(self):
+        """Test fp4 set KV cache with large batch."""
+        self._test_set_kv_fp4_correctness(
+            num_tokens=128,
+            num_heads=16,
+            head_dim=64,
+            cache_size=256,
+        )
+
+    def test_set_kv_fp4_different_head_dims(self):
+        """Test fp4 set KV cache with different head dimensions."""
+        for head_dim in [64, 128, 256]:
+            self._test_set_kv_fp4_correctness(
+                num_tokens=32,
+                num_heads=8,
+                head_dim=head_dim,
+                cache_size=128,
+            )
+
     # ========== Test cases for flatten_kv_cache ==========
 
     def test_flatten_kv_cache_int8_basic(self):
@@ -684,6 +880,26 @@ class TestTRTLLMInt8Int4KVKernel(CustomTestCase):
             head_dim=64,
             page_size=32,
             quant_policy=4,
+        )
+
+    def test_flatten_kv_cache_fp4_basic(self):
+        """Test basic fp4 flatten KV cache."""
+        self._test_flatten_kv_cache_correctness(
+            batch_size=4,
+            num_heads=8,
+            head_dim=128,
+            page_size=16,
+            quant_policy="fp4",
+        )
+
+    def test_flatten_kv_cache_fp4_large_batch(self):
+        """Test fp4 flatten KV cache with large batch."""
+        self._test_flatten_kv_cache_correctness(
+            batch_size=16,
+            num_heads=16,
+            head_dim=64,
+            page_size=32,
+            quant_policy="fp4",
         )
 
     # ========== Tests (set_kv + flatten_kv_cache) ==========
@@ -748,6 +964,37 @@ class TestTRTLLMInt8Int4KVKernel(CustomTestCase):
                 head_dim=head_dim,
                 page_size=16,
                 kv_dtype="int4",
+            )
+
+    def test_set_and_flatten_fp4_basic_rel_error_check(self):
+        """Test: fp4 set_kv + flatten_kv_cache with relative error check."""
+        self._test_set_and_flatten_kv_cache(
+            batch_size=4,
+            num_heads=8,
+            head_dim=128,
+            page_size=16,
+            kv_dtype="fp4",
+        )
+
+    def test_set_and_flatten_fp4_large_batch_rel_error_check(self):
+        """Test: fp4 set_kv + flatten_kv_cache with large batch and relative error check."""
+        self._test_set_and_flatten_kv_cache(
+            batch_size=16,
+            num_heads=16,
+            head_dim=64,
+            page_size=32,
+            kv_dtype="fp4",
+        )
+
+    def test_set_and_flatten_fp4_different_head_dims_rel_error_check(self):
+        """Test: fp4 with different head dimensions and relative error check."""
+        for head_dim in [64, 128, 256]:
+            self._test_set_and_flatten_kv_cache(
+                batch_size=4,
+                num_heads=8,
+                head_dim=head_dim,
+                page_size=16,
+                kv_dtype="fp4",
             )
 
     # ========== Edge cases ==========
@@ -848,6 +1095,46 @@ class TestTRTLLMInt8Int4KVKernel(CustomTestCase):
             v_cache_buffer,
             k_scales_zeros,
             v_scales_zeros,
+        )
+
+    def test_set_kv_fp4_empty_input(self):
+        """Test fp4 set KV cache with empty input."""
+        device = torch.device("cuda")
+        dtype = torch.bfloat16
+        num_tokens = 0
+        num_heads = 8
+        head_dim = 128
+        cache_size = 128
+
+        cache_k = torch.randn(
+            num_tokens, num_heads, head_dim, device=device, dtype=dtype
+        )
+        cache_v = torch.randn(
+            num_tokens, num_heads, head_dim, device=device, dtype=dtype
+        )
+        k_cache_buffer = torch.zeros(
+            cache_size, num_heads, head_dim // 2, device=device, dtype=torch.uint8
+        )
+        v_cache_buffer = torch.zeros(
+            cache_size, num_heads, head_dim // 2, device=device, dtype=torch.uint8
+        )
+        k_scale_buffer = torch.zeros(
+            cache_size, (num_heads * head_dim) // 16, device=device, dtype=torch.uint8
+        )
+        v_scale_buffer = torch.zeros(
+            cache_size, (num_heads * head_dim) // 16, device=device, dtype=torch.uint8
+        )
+        cache_loc = torch.empty(num_tokens, device=device, dtype=torch.int32)
+
+        # Should not crash
+        quantized_set_kv_fp4_torch(
+            cache_k,
+            cache_v,
+            cache_loc,
+            k_cache_buffer,
+            v_cache_buffer,
+            k_scale_buffer,
+            v_scale_buffer,
         )
 
 
