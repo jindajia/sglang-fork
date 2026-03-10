@@ -1,0 +1,4 @@
+[submodule "tore-eval"]
+	path = tore-eval
+	url = git@github.com:togethercomputer/tore-eval.git
+	branch = jisen/kv_rotation_eval
