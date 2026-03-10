@@ -275,3 +275,7 @@ sgl-kernel/csrc/**/*_musa/
 
 # MUSA core dump files
 *.mudmp
+
+# KV rotation evaluation outputs
+eval_results/
+eval_logs/
