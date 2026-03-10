@@ -27,6 +27,8 @@ KVCache actually holds the physical kv cache.
 import abc
 import dataclasses
 import logging
+import math
+import os
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
@@ -35,6 +37,7 @@ import numpy as np
 import torch
 import triton
 import triton.language as tl
+from fast_hadamard_transform import hadamard_transform
 
 from sglang.jit_kernel.kvcache import can_use_store_cache, store_cache
 from sglang.srt.configs.mamba_utils import BaseLinearStateParams
@@ -82,6 +85,9 @@ _is_npu = is_npu()
 _is_cpu = is_cpu()
 _cpu_has_amx_support = cpu_has_amx_support()
 _is_hip = is_hip()
+_hadamard_enabled = 1 if os.environ.get("HADAMARD", "0") in ("1", "true", "True") else 0
+_rotate_v_enabled = 1 if os.environ.get("ROTATE_V", "0") in ("1", "true", "True") else 0
+_hadamard_order = int(os.environ.get("HADAMARD_ORDER", "16"))
 
 
 def get_tensor_size_bytes(t: Union[torch.Tensor, List[torch.Tensor]]):
@@ -1118,7 +1124,31 @@ class MHATokenToKVPool(KVCache):
         if self.dtype in ("int4", "int8"):
             # Use Triton kernels for efficient quantization and direct cache write
             if self.dtype == "int4":
-
+                if _hadamard_enabled:
+                    hadamard_order = _hadamard_order
+                    assert (
+                        cache_k.shape[-1] % hadamard_order == 0
+                    ), f"head_dim must be divisible by {hadamard_order}"
+                    # reshap cache_k shape from (a, b, c, d) to (a, b, c, d // hadamard_order, hadamard_order)
+                    orig_shape = cache_k.shape  # (a, b, c, d)
+                    cache_k = cache_k.view(
+                        *orig_shape[:-1],
+                        orig_shape[-1] // hadamard_order,
+                        hadamard_order,
+                    )
+                    cache_k = hadamard_transform(cache_k / math.sqrt(hadamard_order))
+                    cache_k = cache_k.view(orig_shape)
+                    if _rotate_v_enabled:
+                        orig_shape = cache_v.shape  # (a, b, c, d)
+                        cache_v = cache_v.view(
+                            *orig_shape[:-1],
+                            orig_shape[-1] // hadamard_order,
+                            hadamard_order,
+                        )
+                        cache_v = hadamard_transform(
+                            cache_v / math.sqrt(hadamard_order)
+                        )
+                        cache_v = cache_v.view(orig_shape)
                 # Quantize and write directly to cache buffers using Triton kernel
                 quantized_set_kv_int4_triton(
                     cache_k,

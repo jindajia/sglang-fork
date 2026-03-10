@@ -21,9 +21,16 @@ if TYPE_CHECKING:
     from sglang.srt.layers.radix_attention import RadixAttention
     from sglang.srt.model_executor.model_runner import ModelRunner
 
+import math
+import os
+
+from fast_hadamard_transform import hadamard_transform
 from sgl_kernel import merge_state_v2
 from sgl_kernel.flash_attn import flash_attn_varlen_func as flash_attn_varlen_func_fa3
 from sgl_kernel.flash_attn import flash_attn_with_kvcache as flash_attn_with_kvcache_fa3
+
+_hadamard_enabled = 1 if os.environ.get("HADAMARD", "0") in ("1", "true", "True") else 0
+_rotate_v_enabled = 1 if os.environ.get("ROTATE_V", "0") in ("1", "true", "True") else 0
 
 flash_attn_varlen_func = flash_attn_varlen_func_fa3
 flash_attn_with_kvcache = flash_attn_with_kvcache_fa3
@@ -898,6 +905,17 @@ class FlashAttentionBackend(AttentionBackend):
                     max_seq_len_k=max_seq_len_k,
                     out_size=out_size,
                 )
+                if self.kv_cache_dtype_str == "int4" and _hadamard_enabled:
+                    q = q.contiguous().view(-1, layer.tp_q_head_num, layer.head_dim)
+                    hadamard_order = 16
+                    orig_shape = q.shape  # (a, b, c, d)
+                    q = q.view(
+                        *orig_shape[:-1],
+                        orig_shape[-1] // hadamard_order,
+                        hadamard_order,
+                    )
+                    q = hadamard_transform(q / math.sqrt(hadamard_order))
+                    q = q.view(orig_shape)
 
                 result = flash_attn_varlen_func(
                     q=q.contiguous().view(-1, layer.tp_q_head_num, layer.head_dim),
@@ -913,6 +931,20 @@ class FlashAttentionBackend(AttentionBackend):
                     softcap=layer.logit_cap,
                     **kwargs,
                 )
+                if (
+                    self.kv_cache_dtype_str == "int4"
+                    and _hadamard_enabled
+                    and _rotate_v_enabled
+                ):
+                    hadamard_order = 16
+                    orig_shape = result.shape  # (a, b, c, d)
+                    result = result.view(
+                        *orig_shape[:-1],
+                        orig_shape[-1] // hadamard_order,
+                        hadamard_order,
+                    )
+                    result = hadamard_transform(result / math.sqrt(hadamard_order))
+                    result = result.view(orig_shape)
             else:
                 key_cache, value_cache = forward_batch.token_to_kv_pool.get_kv_buffer(
                     layer.layer_id

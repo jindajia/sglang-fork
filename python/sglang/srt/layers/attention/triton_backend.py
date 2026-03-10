@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import math
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Optional
 
 import torch
 import triton
 import triton.language as tl
+from fast_hadamard_transform import hadamard_transform
 
 from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
 from sglang.srt.layers.attention.utils import create_flashinfer_kv_indices_triton
@@ -24,6 +27,10 @@ if TYPE_CHECKING:
     from sglang.srt.layers.radix_attention import RadixAttention
     from sglang.srt.model_executor.model_runner import ModelRunner
     from sglang.srt.speculative.spec_info import SpecInput
+
+_hadamard_enabled = 1 if os.environ.get("HADAMARD", "0") in ("1", "true", "True") else 0
+_rotate_v_enabled = 1 if os.environ.get("ROTATE_V", "0") in ("1", "true", "True") else 0
+_hadamard_order = int(os.environ.get("HADAMARD_ORDER", "16"))
 
 
 def logit_capping_mod(logit_capping_method, logit_cap):
@@ -1025,6 +1032,17 @@ class TritonAttnBackend(AttentionBackend):
         # Check if KV cache is quantized (INT4/INT8) for optimized attention
         kv_pool = forward_batch.token_to_kv_pool
         if hasattr(kv_pool, "dtype") and kv_pool.dtype in ("int4", "int8"):
+            if kv_pool.dtype == "int4" and _hadamard_enabled:
+                q = q.contiguous().view(-1, layer.tp_q_head_num, layer.head_dim)
+                hadamard_order = _hadamard_order
+                orig_shape = q.shape  # (a, b, c, d)
+                q = q.view(
+                    *orig_shape[:-1],
+                    orig_shape[-1] // hadamard_order,
+                    hadamard_order,
+                )
+                q = hadamard_transform(q / math.sqrt(hadamard_order))
+                q = q.view(orig_shape)
             # Use optimized quantized attention kernel
             # This dequantizes KV cache on-the-fly inside the kernel, avoiding global memory writes
             self.decode_attention_fwd_quantized(
@@ -1046,6 +1064,16 @@ class TritonAttnBackend(AttentionBackend):
                 sinks=sinks,
                 xai_temperature_len=layer.xai_temperature_len,
             )
+            if kv_pool.dtype == "int4" and _hadamard_enabled and _rotate_v_enabled:
+                hadamard_order = _hadamard_order
+                orig_shape = o.shape  # (a, b, c, d)
+                o = o.view(
+                    *orig_shape[:-1],
+                    orig_shape[-1] // hadamard_order,
+                    hadamard_order,
+                )
+                o = hadamard_transform(o / math.sqrt(hadamard_order))
+                o = o.view(orig_shape)
         else:
             # Standard attention with dequantized or non-quantized KV cache
             self.decode_attention_fwd(
