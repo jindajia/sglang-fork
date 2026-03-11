@@ -1,0 +1,9 @@
+# Build dependencies (pre-installed separately before this file)
+# grpcio-tools, numpy, packaging are installed first in the script
+
+# simple_math evaluator dependencies (not in tore-eval's setup)
+ray
+word2number
+huggingface-hub>=0.25.0
+
+# Note: fast-hadamard-transform is installed after sglang (requires torch)
