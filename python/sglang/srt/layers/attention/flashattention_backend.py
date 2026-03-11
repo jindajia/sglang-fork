@@ -31,6 +31,7 @@ from sgl_kernel.flash_attn import flash_attn_with_kvcache as flash_attn_with_kvc
 
 _hadamard_enabled = 1 if os.environ.get("HADAMARD", "0") in ("1", "true", "True") else 0
 _rotate_v_enabled = 1 if os.environ.get("ROTATE_V", "0") in ("1", "true", "True") else 0
+_hadamard_order = int(os.environ.get("HADAMARD_ORDER", "16"))
 
 flash_attn_varlen_func = flash_attn_varlen_func_fa3
 flash_attn_with_kvcache = flash_attn_with_kvcache_fa3
@@ -907,7 +908,7 @@ class FlashAttentionBackend(AttentionBackend):
                 )
                 if self.kv_cache_dtype_str == "int4" and _hadamard_enabled:
                     q = q.contiguous().view(-1, layer.tp_q_head_num, layer.head_dim)
-                    hadamard_order = 16
+                    hadamard_order = _hadamard_order
                     orig_shape = q.shape  # (a, b, c, d)
                     q = q.view(
                         *orig_shape[:-1],
@@ -936,7 +937,7 @@ class FlashAttentionBackend(AttentionBackend):
                     and _hadamard_enabled
                     and _rotate_v_enabled
                 ):
-                    hadamard_order = 16
+                    hadamard_order = _hadamard_order
                     orig_shape = result.shape  # (a, b, c, d)
                     result = result.view(
                         *orig_shape[:-1],
