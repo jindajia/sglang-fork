@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, List, Optional
 
@@ -9,7 +10,11 @@ import triton.language as tl
 
 from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
 from sglang.srt.layers.attention.utils import create_flashinfer_kv_indices_triton
-from sglang.srt.layers.dp_attention import get_attention_tp_size
+from sglang.srt.layers.dp_attention import (
+    get_attention_tp_group,
+    get_attention_tp_rank,
+    get_attention_tp_size,
+)
 from sglang.srt.layers.radix_attention import AttentionType
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
 from sglang.srt.speculative.spec_utils import generate_draft_decode_kv_indices
@@ -101,6 +106,7 @@ class TritonAttnBackend(AttentionBackend):
         self.num_kv_head = model_runner.model_config.get_num_kv_heads(
             get_attention_tp_size()
         )
+        self._dump_kv_done_layers = set()
         if (
             model_runner.hybrid_gdn_config is not None
             or model_runner.kimi_linear_config is not None
@@ -1091,8 +1097,44 @@ class TritonAttnBackend(AttentionBackend):
             kv_indptr = self.forward_metadata.kv_indptr
             kv_indices = self.forward_metadata.kv_indices
 
-        # Check if KV cache is quantized (INT4/INT8) for optimized attention
+        # Optional: dump KV cache for calibration (env DUMP_KVCACHE, DUMP_KVCACHE_TOKENS, DUMP_KVCACHE_DIR)
+        # Each layer dumps once when kv size >= threshold; after save we skip this layer.
         kv_pool = forward_batch.token_to_kv_pool
+        layer_id = layer.layer_id
+        if (
+            layer_id not in self._dump_kv_done_layers
+            and get_bool_env_var("DUMP_KVCACHE", "false")
+            and kv_indices.numel() >= get_int_env_var("DUMP_KVCACHE_TOKENS", 100)
+        ):
+            self._dump_kv_done_layers.add(layer_id)
+            if str(getattr(kv_pool, "device", "cuda")).startswith("cuda"):
+                torch.cuda.synchronize()
+            dump_tokens = get_int_env_var("DUMP_KVCACHE_TOKENS", 100)
+            indices = kv_indices.flatten()
+            if indices.numel() > dump_tokens:
+                indices = indices[:dump_tokens]
+            indices = indices.to(kv_pool.get_key_buffer(layer_id).device)
+            save_dir = os.environ.get("DUMP_KVCACHE_DIR", ".")
+            os.makedirs(save_dir, exist_ok=True)
+            tp_size = get_attention_tp_size()
+            tp_rank = get_attention_tp_rank()
+            k = kv_pool.get_key_buffer(layer_id)[indices]
+            v = kv_pool.get_value_buffer(layer_id)[indices]
+            if tp_size > 1:
+                attn_tp_group = get_attention_tp_group()
+                k = attn_tp_group.all_gather(k, dim=1)
+                v = attn_tp_group.all_gather(v, dim=1)
+            if tp_rank == 0:
+                path = os.path.join(
+                    save_dir, f"kv_calibration_layer_{layer_id}.pt"
+                )
+                torch.save(
+                    {"k": k.cpu(), "v": v.cpu(), "indices": indices.cpu()},
+                    path,
+                )
+                print(f"Dumped KV cache for layer {layer_id} to {path}")
+
+        # Check if KV cache is quantized (INT4/INT8) for optimized attention
         if hasattr(kv_pool, "dtype") and kv_pool.dtype in ("int4", "int8"):
             # Optional centroid add-back for centroid-subtract path
             k_centroids = (
