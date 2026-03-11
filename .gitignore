@@ -275,3 +275,4 @@ sgl-kernel/csrc/**/*_musa/
 # KV rotation evaluation outputs
 eval_results/
 eval_logs/
+.venv/

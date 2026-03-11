@@ -26,7 +26,7 @@ set -eo pipefail
 #   aime24_think
 #   math_500_think
 MODEL_CONFIGS=(
-    "0|0|16|Qwen/Qwen3-4B-Thinking-2507|4|1|2|0,1,2,3,4,5,6,7|gpqa_think:5,humaneval_think:5,customized_livecodebench_think:5,aime24_think:5,math_500_think:5"
+    "1|1|16|Qwen/Qwen3-4B-Thinking-2507|1|1|1|0|gpqa_think:5"
 )
 
 # =============================================================================
@@ -39,8 +39,67 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TORE_EVAL_DIR="$SCRIPT_DIR/tore-eval"
 RESULTS_DIR="$SCRIPT_DIR/eval_results"
 LOGS_DIR="$SCRIPT_DIR/eval_logs"
+CONDA_BASE="/data/jisenli2/miniconda"
+CONDA_ENV_NAME="sglang_eval"
+CONDA_ENV_DIR="$CONDA_BASE/envs/$CONDA_ENV_NAME"
 
 mkdir -p "$RESULTS_DIR" "$LOGS_DIR/inference_logs" "$LOGS_DIR/batch_logs"
+
+# =============================================================================
+# Conda Environment Setup
+# =============================================================================
+
+# Install miniconda if not present
+if [ ! -f "$CONDA_BASE/bin/conda" ]; then
+    echo "Miniconda not found, installing to $CONDA_BASE ..."
+    MINICONDA_INSTALLER=$(mktemp --suffix=.sh)
+    curl -fsSL https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -o "$MINICONDA_INSTALLER"
+    bash "$MINICONDA_INSTALLER" -b -p "$CONDA_BASE"
+    rm -f "$MINICONDA_INSTALLER"
+    "$CONDA_BASE/bin/conda" tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
+    "$CONDA_BASE/bin/conda" tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
+    echo "✓ Miniconda installed"
+fi
+
+CONDA="$CONDA_BASE/bin/conda"
+
+# Accept Anaconda TOS (idempotent, required for non-interactive use)
+"$CONDA" tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main 2>/dev/null || true
+"$CONDA" tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r 2>/dev/null || true
+
+if [ ! -d "$CONDA_ENV_DIR" ]; then
+    echo "Creating conda environment '$CONDA_ENV_NAME' ..."
+    "$CONDA" create -y -n "$CONDA_ENV_NAME" python=3.10 -q
+    echo "Installing cuda-nvcc 12.8 (for fast-hadamard-transform compilation) ..."
+    # cuda-nvcc needs fallback channels to resolve cuda-version dependency
+    "$CONDA" install -y -n "$CONDA_ENV_NAME" \
+        -c "nvidia/label/cuda-12.8.0" -c nvidia -c conda-forge \
+        "cuda-nvcc=12.8.*" -q
+    # Build a self-contained CUDA_HOME layout from the scattered conda install paths
+    mkdir -p "$CONDA_ENV_DIR/cuda-home/bin"
+    ln -sfn "$CONDA_ENV_DIR/bin/nvcc"                          "$CONDA_ENV_DIR/cuda-home/bin/nvcc"
+    ln -sfn "$CONDA_ENV_DIR/bin/crt"                           "$CONDA_ENV_DIR/cuda-home/bin/crt"
+    ln -sfn "$CONDA_ENV_DIR/targets/x86_64-linux/include"     "$CONDA_ENV_DIR/cuda-home/include"
+    ln -sfn "$CONDA_ENV_DIR/targets/x86_64-linux/lib"         "$CONDA_ENV_DIR/cuda-home/lib64"
+    echo "Installing base build dependencies ..."
+    "$CONDA_ENV_DIR/bin/pip" install grpcio-tools numpy packaging -q
+    echo "Installing extra dependencies (requirements-eval.txt) ..."
+    "$CONDA_ENV_DIR/bin/pip" install -r "$SCRIPT_DIR/requirements-eval.txt" -q
+    echo "Installing sglang-fork (editable) ..."
+    "$CONDA_ENV_DIR/bin/pip" install -e "$SCRIPT_DIR/python" --no-build-isolation -q
+    echo "Installing fast-hadamard-transform ..."
+    CUDA_HOME="$CONDA_ENV_DIR/cuda-home" \
+    PATH="$CONDA_ENV_DIR/nvvm/bin:$CONDA_ENV_DIR/bin:/usr/bin:$PATH" \
+        "$CONDA_ENV_DIR/bin/pip" install \
+        "git+https://github.com/Dao-AILab/fast-hadamard-transform.git" \
+        --no-build-isolation -q
+    echo "Installing tore-eval (editable) ..."
+    rm -rf "$TORE_EVAL_DIR/src/tore_eval.egg-info" 2>/dev/null || true
+    "$CONDA_ENV_DIR/bin/pip" install -e "$TORE_EVAL_DIR" -q
+    echo "✓ Conda environment ready"
+fi
+
+PYTHON="$CONDA_ENV_DIR/bin/python3"
 
 # =============================================================================
 # Helper Functions
@@ -70,7 +129,8 @@ eval_single_model() {
     local tasks="$9"
     local model_short_name
     model_short_name=$(extract_model_short_name "$model_name")
-    BATCH_LOG_FILE="$LOGS_DIR/batch_logs/${model_short_name}.log"
+    local rot_suffix="${hadamard}_${rotate_v}_${hadamard_order}"
+    BATCH_LOG_FILE="$LOGS_DIR/batch_logs/${model_short_name}_${rot_suffix}.log"
 
     log_message "=========================================="
     log_message "Model:    $model_name"
@@ -89,7 +149,7 @@ eval_single_model() {
     ROTATE_V=$rotate_v \
     HADAMARD_ORDER=$hadamard_order \
     CUDA_VISIBLE_DEVICES=$gpu_devices \
-    python3 -m sglang.launch_server \
+    "$PYTHON" -m sglang.launch_server \
         --model-path "$model_name" \
         --max-running-requests 32 \
         --max-queued-requests 32 \
@@ -105,7 +165,7 @@ eval_single_model() {
         --data-parallel-size "$dp_size" \
         --host 0.0.0.0 \
         --port "$SERVER_PORT" \
-        > "$LOGS_DIR/inference_logs/${model_short_name}_server.log" 2>&1 &
+        > "$LOGS_DIR/inference_logs/${model_short_name}_${rot_suffix}_server.log" 2>&1 &
 
     SERVER_PID=$!
     log_message "Server started (PID: $SERVER_PID)"
@@ -123,7 +183,7 @@ eval_single_model() {
         fi
         if ! kill -0 $SERVER_PID 2>/dev/null; then
             log_message "✗ Server process died"
-            tail -50 "$LOGS_DIR/inference_logs/${model_short_name}_server.log"
+            tail -50 "$LOGS_DIR/inference_logs/${model_short_name}_${rot_suffix}_server.log"
             return 1
         fi
         if [ $((ELAPSED % 30)) -eq 0 ] && [ $ELAPSED -gt 0 ]; then
@@ -158,14 +218,13 @@ eval_single_model() {
         log_message "=========================================="
 
         for RUN_IDX in $(seq 1 $REPEAT); do
-            RUN_DIR="$RESULTS_DIR/${model_short_name}_${TASK_NAME}/run${RUN_IDX}"
+            RUN_DIR="$RESULTS_DIR/${model_short_name}_${TASK_NAME}_${rot_suffix}/run${RUN_IDX}"
             mkdir -p "$RUN_DIR"
             log_message "  Run ${RUN_IDX}/${REPEAT} -> $RUN_DIR"
 
             cd "$SCRIPT_DIR"
             set +e
-            PYTHONPATH="$TORE_EVAL_DIR/src${PYTHONPATH:+:$PYTHONPATH}" \
-            python3 -m tore_eval.eval \
+            "$PYTHON" -m tore_eval.eval \
                 --framework preset \
                 --preset_name "$TASK_NAME" \
                 --model_name_or_path "$model_name" \
@@ -188,9 +247,9 @@ eval_single_model() {
 
         # Aggregate results across runs (only if repeat > 1)
         if [ $REPEAT -gt 1 ]; then
-            TASK_DIR="$RESULTS_DIR/${model_short_name}_${TASK_NAME}"
+            TASK_DIR="$RESULTS_DIR/${model_short_name}_${TASK_NAME}_${rot_suffix}"
             log_message "Aggregating ${REPEAT} runs for $TASK_NAME..."
-            python3 - <<PYEOF
+            "$PYTHON" - <<PYEOF
 import json, math, os
 
 task_dir = "${TASK_DIR}"
