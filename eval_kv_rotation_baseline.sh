@@ -392,7 +392,7 @@ EOF_SCRIPT
         -e SGLANG_DISABLE_CUDNN_CHECK=1 \
         -p "${port}:${CONTAINER_PORT}" \
         --ipc=host \
-        --shm-size=32g \
+        --shm-size=512g \
         "$DOCKER_IMAGE" \
         bash -s "$model_name" "$model_short_name" "$CONTAINER_PORT" "$tp_size" "$ep_size" "$dp_size" "$NUM_WORKERS" "$tasks" "$port" \
         2>&1 | tee -a "$BATCH_LOG_FILE"
