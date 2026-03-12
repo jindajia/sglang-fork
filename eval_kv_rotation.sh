@@ -31,15 +31,16 @@ set -eo pipefail
 #   math_500_think
 # eg: aime25_think:5,math_500_think (without space after comma)
 TASKS_ALL="gpqa_think:5,humaneval_think:5,customized_livecodebench_think:5,aime25_think:5,math_500_think:5"
+TASKS_ONCE="gpqa_think:1,humaneval_think:1,customized_livecodebench_think:1,aime25_think:1,math_500_think:1"
 MODEL_CONFIGS=(
-    "BASE|0|0|0|BF16|Qwen/Qwen3-4B-Thinking-2507|1|1|1|0|${TASKS_ALL}"
-    "BASE|0|0|0|INT4|Qwen/Qwen3-4B-Thinking-2507|1|1|1|1|${TASKS_ALL}"
-    "QUANT|1|0|16|INT4|Qwen/Qwen3-4B-Thinking-2507|1|1|1|2|${TASKS_ALL}"
-    "QUANT|1|1|16|INT4|Qwen/Qwen3-4B-Thinking-2507|1|1|1|3|${TASKS_ALL}"
-    "QUANT|1|0|64|INT4|Qwen/Qwen3-4B-Thinking-2507|1|1|1|4|${TASKS_ALL}"
-    "QUANT|1|1|64|INT4|Qwen/Qwen3-4B-Thinking-2507|1|1|1|5|${TASKS_ALL}"
-    "QUANT|1|0|128|INT4|Qwen/Qwen3-4B-Thinking-2507|1|1|1|6|${TASKS_ALL}"
-    "QUANT|1|1|128|INT4|Qwen/Qwen3-4B-Thinking-2507|1|1|1|7|${TASKS_ALL}"
+    "BASE|0|0|0|BF16|Qwen/Qwen3-8B|1|1|1|0|${TASKS_ALL}"
+    "BASE|0|0|0|INT4|Qwen/Qwen3-8B|1|1|1|1|${TASKS_ONCE}"
+    "QUANT|1|0|16|INT4|Qwen/Qwen3-8B|1|1|1|2|${TASKS_ALL}"
+    "QUANT|1|1|16|INT4|Qwen/Qwen3-8B|1|1|1|3|${TASKS_ALL}"
+    "QUANT|1|0|64|INT4|Qwen/Qwen3-8B|1|1|1|4|${TASKS_ALL}"
+    "QUANT|1|1|64|INT4|Qwen/Qwen3-8B|1|1|1|5|${TASKS_ALL}"
+    "QUANT|1|0|128|INT4|Qwen/Qwen3-8B|1|1|1|6|${TASKS_ALL}"
+    "QUANT|1|1|128|INT4|Qwen/Qwen3-8B|1|1|1|7|${TASKS_ALL}"
 )
 
 # =============================================================================
@@ -226,7 +227,7 @@ eval_single_model() {
     "$PYTHON" -m sglang.launch_server \
         --model-path "$model_name" \
         --max-running-requests 32 \
-        --max-queued-requests 32 \
+        --max-queued-requests 64 \
         --page-size 128 \
         --chunked-prefill-size 4096 \
         --mem-fraction-static 0.8 \
