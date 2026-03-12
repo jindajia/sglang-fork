@@ -36,6 +36,11 @@ from sglang.jit_kernel.flash_attention_v4 import (
 )
 from sglang.srt.layers.attention.kernels.flatten_kv_cache import flatten_kv_cache_sglang
 
+try:
+    from flash_kmeans import batch_kmeans_Euclid
+except Exception:
+    batch_kmeans_Euclid = None
+
 
 @dataclass
 class FlashAttentionMetadata:
@@ -761,9 +766,69 @@ class FlashAttentionBackend(AttentionBackend):
                     else forward_batch.encoder_out_cache_loc
                 )
                 if not self.use_mla:
-                    forward_batch.token_to_kv_pool.set_kv_buffer(
-                        layer, cache_loc, k, v, layer.k_scale, layer.v_scale
+                    kv_pool = forward_batch.token_to_kv_pool
+                    k_centroids = (
+                        kv_pool.get_k_centroids(layer.layer_id)
+                        if hasattr(kv_pool, "get_k_centroids")
+                        else None
                     )
+                    if (
+                        batch_kmeans_Euclid is not None
+                        and k_centroids is not None
+                        and self.kv_cache_dtype_str in ("int4", "int8")
+                    ):
+                        # Centroid-subtract path: assign, subtract, then set residual
+                        T = k.shape[0] * k.shape[1] if k.dim() == 4 else k.shape[0]
+                        head_dim = layer.head_dim
+                        H = layer.tp_k_head_num
+                        k_flat = k.view(T, H * head_dim)
+                        v_flat = v.view(T, H * head_dim)
+                        k_x = k_flat[None, ...]
+                        v_x = v_flat[None, ...]
+                        n_clusters = kv_pool.n_clusters
+                        k_init = k_centroids.view(n_clusters, -1).to(k.dtype)
+                        v_centroids = kv_pool.get_v_centroids(layer.layer_id)
+                        v_init = v_centroids.view(n_clusters, -1).to(v.dtype)
+                        k_cluster_ids, _, _ = batch_kmeans_Euclid(
+                            k_x,
+                            n_clusters=n_clusters,
+                            max_iters=1,
+                            tol=0.0,
+                            init_centroids=k_init,
+                            use_heuristic=True,
+                            verbose=False,
+                        )
+                        v_cluster_ids, _, _ = batch_kmeans_Euclid(
+                            v_x,
+                            n_clusters=n_clusters,
+                            max_iters=1,
+                            tol=0.0,
+                            init_centroids=v_init,
+                            use_heuristic=True,
+                            verbose=False,
+                        )
+                        k_res = k_flat - k_centroids[
+                            k_cluster_ids.squeeze(0)
+                        ].reshape(T, H * head_dim)
+                        v_res = v_flat - v_centroids[
+                            v_cluster_ids.squeeze(0)
+                        ].reshape(T, H * head_dim)
+                        k_res = k_res.reshape(k.shape)
+                        v_res = v_res.reshape(v.shape)
+                        kv_pool.set_kv_buffer(
+                            layer,
+                            cache_loc,
+                            k_res,
+                            v_res,
+                            layer.k_scale,
+                            layer.v_scale,
+                            k_cluster_ids=k_cluster_ids.squeeze(0),
+                            v_cluster_ids=v_cluster_ids.squeeze(0),
+                        )
+                    else:
+                        forward_batch.token_to_kv_pool.set_kv_buffer(
+                            layer, cache_loc, k, v, layer.k_scale, layer.v_scale
+                        )
                 else:
                     forward_batch.token_to_kv_pool.set_mla_kv_buffer(
                         layer,
@@ -879,6 +944,27 @@ class FlashAttentionBackend(AttentionBackend):
                 kv_data = forward_batch.token_to_kv_pool.get_raw_kv_buffer(
                     layer.layer_id
                 )
+                kv_pool_prefill = forward_batch.token_to_kv_pool
+                k_centroids_ly = (
+                    kv_pool_prefill.get_k_centroids(layer.layer_id)
+                    if hasattr(kv_pool_prefill, "get_k_centroids")
+                    else None
+                )
+                v_centroids_ly = (
+                    kv_pool_prefill.get_v_centroids(layer.layer_id)
+                    if hasattr(kv_pool_prefill, "get_v_centroids")
+                    else None
+                )
+                k_cid_buf = (
+                    kv_pool_prefill.get_k_cluster_ids(layer.layer_id)
+                    if hasattr(kv_pool_prefill, "get_k_cluster_ids")
+                    else None
+                )
+                v_cid_buf = (
+                    kv_pool_prefill.get_v_cluster_ids(layer.layer_id)
+                    if hasattr(kv_pool_prefill, "get_v_cluster_ids")
+                    else None
+                )
 
                 out_size = metadata.kv_flatten_size
                 flatten_k, flatten_v = flatten_kv_cache_sglang(
@@ -897,6 +983,10 @@ class FlashAttentionBackend(AttentionBackend):
                     output_dtype=q.dtype,
                     max_seq_len_k=max_seq_len_k,
                     out_size=out_size,
+                    k_centroids=k_centroids_ly,
+                    v_centroids=v_centroids_ly,
+                    k_cluster_ids=k_cid_buf,
+                    v_cluster_ids=v_cid_buf,
                 )
 
                 result = flash_attn_varlen_func(

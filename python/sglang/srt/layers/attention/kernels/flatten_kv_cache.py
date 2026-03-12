@@ -12,7 +12,7 @@ Key benefits:
 - Combines scatter-gather + dequantization in one kernel
 """
 
-from typing import Literal, Tuple
+from typing import Literal, Optional, Tuple
 
 import torch
 import triton
@@ -67,6 +67,18 @@ def _flatten_kv_cache_quant_sglang(
     BLOCK_SIZE: tl.constexpr,  # Number of tokens to process per kernel block
     BLOCK_DK: tl.constexpr,
     BLOCK_DV: tl.constexpr,
+    # Optional centroid add-back (when HAS_KV_CENTROIDS)
+    HAS_KV_CENTROIDS: tl.constexpr,
+    K_Centroids,
+    V_Centroids,
+    K_ClusterIds,
+    V_ClusterIds,
+    stride_cent_k_n,  # K centroids [n_clusters, num_heads, head_dim]: stride cluster
+    stride_cent_k_h,  # stride head
+    stride_cent_k_d,  # stride dim
+    stride_cent_v_n,
+    stride_cent_v_h,
+    stride_cent_v_d,
 ):
     """
     Flatten slot-based KV cache with on-demand dequantization for SGLang.
@@ -169,6 +181,37 @@ def _flatten_kv_cache_quant_sglang(
         k_upper = (((kc_packed >> 4) & 0x0F).to(tl.float32) - kz[:, None]) * ks[:, None]
         k_upper = k_upper.to(ko_ptr.dtype.element_ty)
 
+        if HAS_KV_CENTROIDS:
+            k_cid = tl.load(
+                K_ClusterIds + slot_indices, mask=mask_tok, other=0
+            )
+            offs_d_first = tl.arange(0, BLOCK_DK // 2)
+            offs_d_second = tl.arange(BLOCK_DK // 2, BLOCK_DK)
+            mask_d_first = offs_d_first < (HEAD_DIM_K // 2)
+            mask_d_second = offs_d_second < HEAD_DIM_K
+            offs_kc_first = (
+                k_cid[:, None] * stride_cent_k_n
+                + head_id * stride_cent_k_h
+                + offs_d_first[None, :]
+            )
+            k_cent_first = tl.load(
+                K_Centroids + offs_kc_first,
+                mask=mask_tok[:, None] & mask_d_first[None, :],
+                other=0.0,
+            ).to(ko_ptr.dtype.element_ty)
+            k_lower += k_cent_first
+            offs_kc_second = (
+                k_cid[:, None] * stride_cent_k_n
+                + head_id * stride_cent_k_h
+                + offs_d_second[None, :]
+            )
+            k_cent_second = tl.load(
+                K_Centroids + offs_kc_second,
+                mask=mask_tok[:, None] & mask_d_second[None, :],
+                other=0.0,
+            ).to(ko_ptr.dtype.element_ty)
+            k_upper += k_cent_second
+
         # For storing: offs_dk now has correct size (BLOCK_DK_PACKED)
         # Store lower half to [0, HEAD_DIM_K//2)
         ko_ptrs_lower = (
@@ -205,6 +248,22 @@ def _flatten_kv_cache_quant_sglang(
         kq = ((kc.to(tl.float32) - kz[:, None]) * ks[:, None]).to(
             ko_ptr.dtype.element_ty
         )
+
+        if HAS_KV_CENTROIDS:
+            k_cid = tl.load(
+                K_ClusterIds + slot_indices, mask=mask_tok, other=0
+            )
+            offs_kc = (
+                k_cid[:, None] * stride_cent_k_n
+                + head_id * stride_cent_k_h
+                + offs_dok[None, :]
+            )
+            k_cent = tl.load(
+                K_Centroids + offs_kc,
+                mask=mask_tok[:, None] & mask_dok[None, :],
+                other=0.0,
+            ).to(ko_ptr.dtype.element_ty)
+            kq += k_cent
 
         # Store to flattened output
         ko_ptrs = (
@@ -244,6 +303,37 @@ def _flatten_kv_cache_quant_sglang(
         v_upper = (((vc_packed >> 4) & 0x0F).to(tl.float32) - vz[:, None]) * vs[:, None]
         v_upper = v_upper.to(vo_ptr.dtype.element_ty)
 
+        if HAS_KV_CENTROIDS:
+            v_cid = tl.load(
+                V_ClusterIds + slot_indices, mask=mask_tok, other=0
+            )
+            offs_dv_first = tl.arange(0, BLOCK_DV // 2)
+            offs_dv_second = tl.arange(BLOCK_DV // 2, BLOCK_DV)
+            mask_dv_first = offs_dv_first < (HEAD_DIM_V // 2)
+            mask_dv_second = offs_dv_second < HEAD_DIM_V
+            offs_vc_first = (
+                v_cid[:, None] * stride_cent_v_n
+                + head_id * stride_cent_v_h
+                + offs_dv_first[None, :]
+            )
+            v_cent_first = tl.load(
+                V_Centroids + offs_vc_first,
+                mask=mask_tok[:, None] & mask_dv_first[None, :],
+                other=0.0,
+            ).to(vo_ptr.dtype.element_ty)
+            v_lower += v_cent_first
+            offs_vc_second = (
+                v_cid[:, None] * stride_cent_v_n
+                + head_id * stride_cent_v_h
+                + offs_dv_second[None, :]
+            )
+            v_cent_second = tl.load(
+                V_Centroids + offs_vc_second,
+                mask=mask_tok[:, None] & mask_dv_second[None, :],
+                other=0.0,
+            ).to(vo_ptr.dtype.element_ty)
+            v_upper += v_cent_second
+
         # For storing: offs_dv now has correct size (BLOCK_DV_PACKED)
         # Store lower half to [0, HEAD_DIM_V//2)
         vo_ptrs_lower = (
@@ -281,6 +371,22 @@ def _flatten_kv_cache_quant_sglang(
             vo_ptr.dtype.element_ty
         )
 
+        if HAS_KV_CENTROIDS:
+            v_cid = tl.load(
+                V_ClusterIds + slot_indices, mask=mask_tok, other=0
+            )
+            offs_vc = (
+                v_cid[:, None] * stride_cent_v_n
+                + head_id * stride_cent_v_h
+                + offs_dov[None, :]
+            )
+            v_cent = tl.load(
+                V_Centroids + offs_vc,
+                mask=mask_tok[:, None] & mask_dov[None, :],
+                other=0.0,
+            ).to(vo_ptr.dtype.element_ty)
+            vq += v_cent
+
         # Store to flattened output
         vo_ptrs = (
             vo_ptr
@@ -307,6 +413,10 @@ def flatten_kv_cache_sglang(
     output_dtype: torch.dtype,
     max_seq_len_k: int,
     out_size: int,
+    k_centroids: Optional[torch.Tensor] = None,
+    v_centroids: Optional[torch.Tensor] = None,
+    k_cluster_ids: Optional[torch.Tensor] = None,
+    v_cluster_ids: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Flatten paged KV cache with on-demand dequantization for SGLang.
@@ -391,6 +501,31 @@ def flatten_kv_cache_sglang(
     # Get total slots for bounds checking
     total_slots = k_cache.size(0)
 
+    has_centroids = (
+        k_centroids is not None
+        and v_centroids is not None
+        and k_cluster_ids is not None
+        and v_cluster_ids is not None
+    )
+    if has_centroids:
+        k_c_ptr = k_centroids
+        v_c_ptr = v_centroids
+        k_cid_ptr = k_cluster_ids
+        v_cid_ptr = v_cluster_ids
+        stride_cent_k_n = k_centroids.stride(0)
+        stride_cent_k_h = k_centroids.stride(1)
+        stride_cent_k_d = k_centroids.stride(2)
+        stride_cent_v_n = v_centroids.stride(0)
+        stride_cent_v_h = v_centroids.stride(1)
+        stride_cent_v_d = v_centroids.stride(2)
+    else:
+        k_c_ptr = k_cache
+        v_c_ptr = v_cache
+        k_cid_ptr = k_cache
+        v_cid_ptr = v_cache
+        stride_cent_k_n = stride_cent_k_h = stride_cent_k_d = 0
+        stride_cent_v_n = stride_cent_v_h = stride_cent_v_d = 0
+
     _flatten_kv_cache_quant_sglang[grid](
         # Input buffers
         k_cache,
@@ -436,6 +571,18 @@ def flatten_kv_cache_sglang(
         BLOCK_SIZE=BLOCK_SIZE,
         BLOCK_DK=BLOCK_DK,
         BLOCK_DV=BLOCK_DV,
+        # Optional centroid add-back
+        HAS_KV_CENTROIDS=has_centroids,
+        K_Centroids=k_c_ptr,
+        V_Centroids=v_c_ptr,
+        K_ClusterIds=k_cid_ptr,
+        V_ClusterIds=v_cid_ptr,
+        stride_cent_k_n=stride_cent_k_n,
+        stride_cent_k_h=stride_cent_k_h,
+        stride_cent_k_d=stride_cent_k_d,
+        stride_cent_v_n=stride_cent_v_n,
+        stride_cent_v_h=stride_cent_v_h,
+        stride_cent_v_d=stride_cent_v_d,
     )
 
     return k_flattened, v_flattened

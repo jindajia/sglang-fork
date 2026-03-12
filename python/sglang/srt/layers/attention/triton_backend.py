@@ -20,6 +20,11 @@ from sglang.srt.utils import (
     next_power_of_2,
 )
 
+try:
+    from flash_kmeans import _euclid_iter_compiled
+except Exception:
+    _euclid_iter_compiled = None
+
 if TYPE_CHECKING:
     from sglang.srt.layers.radix_attention import RadixAttention
     from sglang.srt.model_executor.model_runner import ModelRunner
@@ -1026,9 +1031,58 @@ class TritonAttnBackend(AttentionBackend):
         logits_soft_cap = logit_capping_mod(layer.logit_capping_method, layer.logit_cap)
 
         if save_kv_cache:
-            forward_batch.token_to_kv_pool.set_kv_buffer(
-                layer, forward_batch.out_cache_loc, k, v
+            kv_pool = forward_batch.token_to_kv_pool
+            k_centroids_ly = (
+                kv_pool.get_k_centroids(layer.layer_id)
+                if hasattr(kv_pool, "get_k_centroids")
+                else None
             )
+            if (
+                _euclid_iter_compiled is not None
+                and k_centroids_ly is not None
+                and hasattr(kv_pool, "dtype")
+                and kv_pool.dtype in ("int4", "int8")
+            ):
+                # Decode: one token per batch item; assign-only via _euclid_iter_compiled
+                T = k.shape[0]
+                head_dim = layer.head_dim
+                H = layer.tp_k_head_num
+                k_flat = k.reshape(T, H * head_dim)
+                v_flat = v.reshape(T, H * head_dim)
+                k_x = k_flat[None, ...].to(k.device)
+                v_x = v_flat[None, ...].to(v.device)
+                n_clusters = kv_pool.n_clusters
+                k_init = k_centroids_ly.reshape(n_clusters, -1).to(k.dtype).unsqueeze(0)
+                v_centroids_ly = kv_pool.get_v_centroids(layer.layer_id)
+                v_init = v_centroids_ly.reshape(n_clusters, -1).to(v.dtype).unsqueeze(0)
+                k_x_sq = (k_x ** 2).sum(dim=-1)
+                v_x_sq = (v_x ** 2).sum(dim=-1)
+                _, _, k_cluster_ids = _euclid_iter_compiled(
+                    k_x, k_x_sq, k_init, use_heuristic=True
+                )
+                _, _, v_cluster_ids = _euclid_iter_compiled(
+                    v_x, v_x_sq, v_init, use_heuristic=True
+                )
+                k_res = k_flat - k_centroids_ly[
+                    k_cluster_ids.squeeze(0)
+                ].reshape(T, H * head_dim)
+                v_res = v_flat - v_centroids_ly[
+                    v_cluster_ids.squeeze(0)
+                ].reshape(T, H * head_dim)
+                k_res = k_res.reshape(k.shape)
+                v_res = v_res.reshape(v.shape)
+                kv_pool.set_kv_buffer(
+                    layer,
+                    forward_batch.out_cache_loc,
+                    k_res,
+                    v_res,
+                    k_cluster_ids=k_cluster_ids.squeeze(0),
+                    v_cluster_ids=v_cluster_ids.squeeze(0),
+                )
+            else:
+                forward_batch.token_to_kv_pool.set_kv_buffer(
+                    layer, forward_batch.out_cache_loc, k, v
+                )
 
         if layer.sliding_window_size is not None and layer.sliding_window_size > -1:
             kv_indptr = self.forward_metadata.window_kv_indptr
@@ -1040,6 +1094,27 @@ class TritonAttnBackend(AttentionBackend):
         # Check if KV cache is quantized (INT4/INT8) for optimized attention
         kv_pool = forward_batch.token_to_kv_pool
         if hasattr(kv_pool, "dtype") and kv_pool.dtype in ("int4", "int8"):
+            # Optional centroid add-back for centroid-subtract path
+            k_centroids = (
+                kv_pool.get_k_centroids(layer.layer_id)
+                if hasattr(kv_pool, "get_k_centroids")
+                else None
+            )
+            v_centroids = (
+                kv_pool.get_v_centroids(layer.layer_id)
+                if hasattr(kv_pool, "get_v_centroids")
+                else None
+            )
+            k_cluster_ids = (
+                kv_pool.get_k_cluster_ids(layer.layer_id)
+                if hasattr(kv_pool, "get_k_cluster_ids")
+                else None
+            )
+            v_cluster_ids = (
+                kv_pool.get_v_cluster_ids(layer.layer_id)
+                if hasattr(kv_pool, "get_v_cluster_ids")
+                else None
+            )
             # Use optimized quantized attention kernel
             # This dequantizes KV cache on-the-fly inside the kernel, avoiding global memory writes
             self.decode_attention_fwd_quantized(
@@ -1060,6 +1135,10 @@ class TritonAttnBackend(AttentionBackend):
                 logit_cap=logits_soft_cap,
                 sinks=sinks,
                 xai_temperature_len=layer.xai_temperature_len,
+                k_centroids=k_centroids,
+                v_centroids=v_centroids,
+                k_cluster_ids=k_cluster_ids,
+                v_cluster_ids=v_cluster_ids,
             )
         else:
             # Standard attention with dequantized or non-quantized KV cache

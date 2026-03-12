@@ -865,6 +865,17 @@ def _fwd_grouped_kernel_stage1_quant_int4(
     xai_temperature_len: tl.constexpr,
     Lk: tl.constexpr,
     Lv: tl.constexpr,
+    HAS_KV_CENTROIDS: tl.constexpr,
+    K_Centroids,
+    V_Centroids,
+    K_ClusterIds,
+    V_ClusterIds,
+    stride_kcn,
+    stride_kch,
+    stride_kcd,
+    stride_vcn,
+    stride_vch,
+    stride_vcd,
 ):
     cur_batch = tl.program_id(0)
     cur_head_id = tl.program_id(1)
@@ -992,6 +1003,36 @@ def _fwd_grouped_kernel_stage1_quant_int4(
                 * k_scale[None, :]
             ).to(q_first.dtype)
 
+            if HAS_KV_CENTROIDS:
+                k_cid = tl.load(
+                    K_ClusterIds + kv_loc,
+                    mask=offs_n < split_kv_end,
+                    other=0,
+                )
+                # Load in [BLOCK_DMODEL//2, BLOCK_N] layout to avoid transpose
+                offs_kc_first = (
+                    k_cid[None, :] * stride_kcn
+                    + cur_kv_head * stride_kch
+                    + offs_d_first[:, None]
+                )
+                k_c_first = tl.load(
+                    K_Centroids + offs_kc_first,
+                    mask=(mask_d_first[:, None]) & (offs_n[None, :] < split_kv_end),
+                    other=0.0,
+                ).to(q_first.dtype)
+                k_lower += k_c_first
+                offs_kc_second = (
+                    k_cid[None, :] * stride_kcn
+                    + cur_kv_head * stride_kch
+                    + offs_d_second[:, None]
+                )
+                k_c_second = tl.load(
+                    K_Centroids + offs_kc_second,
+                    mask=(mask_d_second[:, None]) & (offs_n[None, :] < split_kv_end),
+                    other=0.0,
+                ).to(q_first.dtype)
+                k_upper += k_c_second
+
             # Compute QK for both halves
             # q_first: [BLOCK_H, BLOCK_DMODEL//2], k_lower: [BLOCK_DMODEL//2, BLOCK_N]
             # qk = q_first @ k_lower + q_second @ k_upper
@@ -1059,6 +1100,39 @@ def _fwd_grouped_kernel_stage1_quant_int4(
                 (((v_packed >> 4) & 0x0F).to(tl.float32) - v_zero[:, None])
                 * v_scale[:, None]
             ).to(q_first.dtype)
+
+            if HAS_KV_CENTROIDS:
+                v_cid = tl.load(
+                    V_ClusterIds + kv_loc,
+                    mask=offs_n < split_kv_end,
+                    other=0,
+                )
+                offs_dv_first = tl.arange(0, BLOCK_DV // 2)
+                offs_dv_second = tl.arange(BLOCK_DV // 2, BLOCK_DV)
+                mask_dv_first = offs_dv_first < (Lv // 2)
+                mask_dv_second = offs_dv_second < Lv
+                offs_vc_first = (
+                    v_cid[:, None] * stride_vcn
+                    + cur_kv_head * stride_vch
+                    + offs_dv_first[None, :]
+                )
+                v_c_first = tl.load(
+                    V_Centroids + offs_vc_first,
+                    mask=(offs_n[:, None] < split_kv_end) & (mask_dv_first[None, :]),
+                    other=0.0,
+                ).to(q_first.dtype)
+                v_lower += v_c_first
+                offs_vc_second = (
+                    v_cid[:, None] * stride_vcn
+                    + cur_kv_head * stride_vch
+                    + offs_dv_second[None, :]
+                )
+                v_c_second = tl.load(
+                    V_Centroids + offs_vc_second,
+                    mask=(offs_n[:, None] < split_kv_end) & (mask_dv_second[None, :]),
+                    other=0.0,
+                ).to(q_first.dtype)
+                v_upper += v_c_second
 
             n_e_max = tl.maximum(tl.max(qk, 1), e_max)
             re_scale = tl.exp(e_max - n_e_max)
@@ -1726,6 +1800,10 @@ def _decode_grouped_att_m_fwd_quant_int4(
     sm_scale,
     logit_cap,
     xai_temperature_len=-1,
+    k_centroids=None,
+    v_centroids=None,
+    k_cluster_ids=None,
+    v_cluster_ids=None,
 ):
     BLOCK = 32
     # For INT4, k_buffer is packed, so actual Lk is 2x the last dimension
@@ -1764,6 +1842,31 @@ def _decode_grouped_att_m_fwd_quant_int4(
         extra_kargs = {"waves_per_eu": 1, "matrix_instr_nonkdim": 16, "kpack": 2}
         num_stages = 1
 
+    has_centroids = (
+        k_centroids is not None
+        and v_centroids is not None
+        and k_cluster_ids is not None
+        and v_cluster_ids is not None
+    )
+    if has_centroids:
+        k_c_ptr = k_centroids
+        v_c_ptr = v_centroids
+        k_cid_ptr = k_cluster_ids
+        v_cid_ptr = v_cluster_ids
+        stride_kcn = k_centroids.stride(0)
+        stride_kch = k_centroids.stride(1)
+        stride_kcd = k_centroids.stride(2)
+        stride_vcn = v_centroids.stride(0)
+        stride_vch = v_centroids.stride(1)
+        stride_vcd = v_centroids.stride(2)
+    else:
+        k_c_ptr = k_buffer
+        v_c_ptr = v_buffer
+        k_cid_ptr = k_buffer
+        v_cid_ptr = v_buffer
+        stride_kcn = stride_kch = stride_kcd = 0
+        stride_vcn = stride_vch = stride_vcd = 0
+
     _fwd_grouped_kernel_stage1_quant_int4[grid](
         q,
         k_buffer,
@@ -1801,6 +1904,17 @@ def _decode_grouped_att_m_fwd_quant_int4(
         num_stages=num_stages,
         Lk=Lk,
         Lv=Lv,
+        HAS_KV_CENTROIDS=has_centroids,
+        K_Centroids=k_c_ptr,
+        V_Centroids=v_c_ptr,
+        K_ClusterIds=k_cid_ptr,
+        V_ClusterIds=v_cid_ptr,
+        stride_kcn=stride_kcn,
+        stride_kch=stride_kch,
+        stride_kcd=stride_kcd,
+        stride_vcn=stride_vcn,
+        stride_vch=stride_vch,
+        stride_vcd=stride_vcd,
         **extra_kargs,
     )
 
@@ -2110,6 +2224,10 @@ def decode_attention_fwd_grouped_quant(
     logit_cap=0.0,
     sinks=None,
     xai_temperature_len=-1,
+    k_centroids=None,
+    v_centroids=None,
+    k_cluster_ids=None,
+    v_cluster_ids=None,
 ):
     """
     Grouped (GQA/MQA) attention forward with quantized (INT4/INT8) KV cache.
@@ -2154,6 +2272,10 @@ def decode_attention_fwd_grouped_quant(
             sm_scale,
             logit_cap,
             xai_temperature_len,
+            k_centroids=k_centroids,
+            v_centroids=v_centroids,
+            k_cluster_ids=k_cluster_ids,
+            v_cluster_ids=v_cluster_ids,
         )
         # For INT4, v_buffer is packed (half size), but stage2 needs full dimension
         # Create a dummy tensor with correct shape for stage2 to extract Lv
@@ -2193,6 +2315,10 @@ def decode_attention_fwd_quantized(
     logit_cap=0.0,
     sinks=None,
     xai_temperature_len=-1,
+    k_centroids=None,
+    v_centroids=None,
+    k_cluster_ids=None,
+    v_cluster_ids=None,
 ):
     """
     Attention forward with quantized (INT4/INT8) KV cache.
@@ -2248,6 +2374,10 @@ def decode_attention_fwd_quantized(
             logit_cap=logit_cap,
             sinks=sinks,
             xai_temperature_len=xai_temperature_len,
+            k_centroids=k_centroids,
+            v_centroids=v_centroids,
+            k_cluster_ids=k_cluster_ids,
+            v_cluster_ids=v_cluster_ids,
         )
 
 

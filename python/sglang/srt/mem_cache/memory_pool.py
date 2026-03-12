@@ -35,6 +35,7 @@ import numpy as np
 import torch
 import triton
 import triton.language as tl
+import os
 
 from sglang.jit_kernel.kvcache import can_use_store_cache, store_cache
 from sglang.srt.configs.mamba_utils import BaseLinearStateParams
@@ -44,6 +45,10 @@ from sglang.srt.layers.attention.nsa import index_buf_accessor
 from sglang.srt.layers.attention.nsa.quant_k_cache import (
     quantize_k_cache,
     quantize_k_cache_separate,
+)
+from sglang.srt.layers.dp_attention import (
+    get_attention_tp_rank,
+    get_attention_tp_size,
 )
 from sglang.srt.layers.radix_attention import RadixAttention
 from sglang.srt.mem_cache.kv_quant_kernels import (
@@ -749,6 +754,11 @@ class MHATokenToKVPool(KVCache):
 
         self._create_buffers()
 
+        self.k_centroids = None
+        self.v_centroids = None
+        if envs.SGLANG_KV_CENTROIDS_PATH.get() and self.dtype in ("int4", "int8"):
+            self._load_kv_centroids()
+
         self.device_module = torch.get_device_module(self.device)
         self.alt_stream = (
             self.device_module.Stream() if _is_cuda and enable_alt_stream else None
@@ -764,6 +774,50 @@ class MHATokenToKVPool(KVCache):
         # for store_cache JIT kernel
         self.row_dim = self.head_num * self.head_dim
         self.same_kv_dim = self.head_dim == self.v_head_dim
+
+    def _load_kv_centroids(self):
+        """Load K/V centroids from env path and partition for tensor parallel."""
+
+        base_path = envs.SGLANG_KV_CENTROIDS_PATH.get()
+        if not base_path or not os.path.isdir(base_path):
+            self.k_centroids = None
+            self.v_centroids = None
+            self.n_clusters = 0
+            return
+        n_clusters = int(os.environ.get("N_CLUSTERS", 16))
+        tp_rank = get_attention_tp_rank()
+        tp_size = get_attention_tp_size()
+        head_dim = self.head_dim
+        tp_head_num = self.head_num
+        start_head = tp_rank * tp_head_num
+        end_head = start_head + tp_head_num
+        self.k_centroids = []
+        self.v_centroids = []
+        for layer_id in range(self.layer_num):
+            global_layer = self.start_layer + layer_id
+            k_path = os.path.join(
+                base_path,
+                f"k_layer_{global_layer}_clusters_{n_clusters}_centers.pt",
+            )
+            v_path = os.path.join(
+                base_path,
+                f"v_layer_{global_layer}_clusters_{n_clusters}_centers.pt",
+            )
+            k_centers = torch.load(k_path, map_location=self.device, weights_only=True)
+            v_centers = torch.load(v_path, map_location=self.device, weights_only=True)
+            # k_centers: (n_clusters, num_kv_heads_global * head_dim)
+            k_slice = k_centers[:, start_head * head_dim : end_head * head_dim]
+            v_slice = v_centers[:, start_head * head_dim : end_head * head_dim]
+            k_centroids_layer = k_slice.view(
+                n_clusters, tp_head_num, head_dim
+            ).to(self.device)
+            v_centroids_layer = v_slice.view(
+                n_clusters, tp_head_num, head_dim
+            ).to(self.device)
+            self.k_centroids.append(k_centroids_layer)
+            self.v_centroids.append(v_centroids_layer)
+        self.n_clusters = n_clusters
+        logger.info(f"JINDA_DEBUG: Loaded {n_clusters} clusters for {self.layer_num} layers")
 
     def _init_kv_copy_and_warmup(self):
         # Heuristics for KV copy tiling
@@ -918,6 +972,28 @@ class MHATokenToKVPool(KVCache):
                         for _ in range(self.layer_num)
                     ]
 
+                # Cluster-id buffers for centroid-subtract path (int4/int8 only)
+                if self.dtype in ("int4", "int8") and envs.SGLANG_KV_CENTROIDS_PATH.get():
+                    self.k_cluster_ids = [
+                        torch.zeros(
+                            self.size + self.page_size,
+                            dtype=torch.uint8,
+                            device=self.device,
+                        )
+                        for _ in range(self.layer_num)
+                    ]
+                    self.v_cluster_ids = [
+                        torch.zeros(
+                            self.size + self.page_size,
+                            dtype=torch.uint8,
+                            device=self.device,
+                        )
+                        for _ in range(self.layer_num)
+                    ]
+                else:
+                    self.k_cluster_ids = None
+                    self.v_cluster_ids = None
+
         self.k_data_ptrs = torch.tensor(
             [x.data_ptr() for x in self.k_buffer],
             dtype=torch.uint64,
@@ -1071,6 +1147,30 @@ class MHATokenToKVPool(KVCache):
             self.layer_transfer_counter.wait_until(layer_id - self.start_layer)
         return self.v_scales_zeros[layer_id - self.start_layer]
 
+    def get_k_centroids(self, layer_id: int) -> Optional[torch.Tensor]:
+        """Get K centroids for this layer (n_clusters, num_heads, head_dim) or None."""
+        if self.k_centroids is None:
+            return None
+        return self.k_centroids[layer_id - self.start_layer]
+
+    def get_v_centroids(self, layer_id: int) -> Optional[torch.Tensor]:
+        """Get V centroids for this layer (n_clusters, num_heads, head_dim) or None."""
+        if self.v_centroids is None:
+            return None
+        return self.v_centroids[layer_id - self.start_layer]
+
+    def get_k_cluster_ids(self, layer_id: int) -> Optional[torch.Tensor]:
+        """Get K cluster_ids buffer for this layer (1D, size) or None."""
+        if self.k_cluster_ids is None:
+            return None
+        return self.k_cluster_ids[layer_id - self.start_layer]
+
+    def get_v_cluster_ids(self, layer_id: int) -> Optional[torch.Tensor]:
+        """Get V cluster_ids buffer for this layer (1D, size) or None."""
+        if self.v_cluster_ids is None:
+            return None
+        return self.v_cluster_ids[layer_id - self.start_layer]
+
     def get_raw_kv_buffer(self, layer_id: int):
         """
         Get raw quantized KV buffer with scales/zeros for efficient dequantization.
@@ -1109,6 +1209,8 @@ class MHATokenToKVPool(KVCache):
         k_scale: Optional[float] = None,
         v_scale: Optional[float] = None,
         layer_id_override: Optional[int] = None,
+        k_cluster_ids: Optional[torch.Tensor] = None,
+        v_cluster_ids: Optional[torch.Tensor] = None,
     ):
         if layer_id_override is not None:
             layer_id = layer_id_override
@@ -1143,6 +1245,24 @@ class MHATokenToKVPool(KVCache):
                     self.v_scales_zeros[layer_id - self.start_layer],
                 )
 
+            # Write cluster_ids when centroid path is enabled
+            if self.k_cluster_ids is not None and k_cluster_ids is not None:
+                loc_flat = loc.view(-1)
+                k_cluster_ids_flat = k_cluster_ids.view(-1).to(
+                    dtype=torch.uint8, device=self.device
+                )
+                self.k_cluster_ids[layer_id - self.start_layer][loc_flat] = (
+                    k_cluster_ids_flat
+                )
+            if self.v_cluster_ids is not None and v_cluster_ids is not None:
+                loc_flat = loc.view(-1)
+                v_cluster_ids_flat = v_cluster_ids.view(-1).to(
+                    dtype=torch.uint8, device=self.device
+                )
+                self.v_cluster_ids[layer_id - self.start_layer][loc_flat] = (
+                    v_cluster_ids_flat
+                )
+
             # Early return - INT4/INT8 quantization is complete
             return
 
@@ -1174,6 +1294,14 @@ class MHATokenToKVPool(KVCache):
     def move_kv_cache(self, tgt_loc: torch.Tensor, src_loc: torch.Tensor):
         if envs.SGLANG_NATIVE_MOVE_KV_CACHE.get():
             move_kv_cache_native(self.k_buffer, self.v_buffer, tgt_loc, src_loc)
+            if self.k_cluster_ids is not None:
+                for layer_id in range(self.layer_num):
+                    self.k_cluster_ids[layer_id][tgt_loc] = self.k_cluster_ids[
+                        layer_id
+                    ][src_loc]
+                    self.v_cluster_ids[layer_id][tgt_loc] = self.v_cluster_ids[
+                        layer_id
+                    ][src_loc]
             return
 
         N = tgt_loc.numel()
@@ -1201,6 +1329,14 @@ class MHATokenToKVPool(KVCache):
                 num_warps=cfg["num_warps"],
                 num_stages=2,
             )
+            if self.k_cluster_ids is not None:
+                for layer_id in range(self.layer_num):
+                    self.k_cluster_ids[layer_id][tgt_loc] = self.k_cluster_ids[
+                        layer_id
+                    ][src_loc]
+                    self.v_cluster_ids[layer_id][tgt_loc] = self.v_cluster_ids[
+                        layer_id
+                    ][src_loc]
             return
 
         # Huge N: chunk, but each chunk's upper is still pow2(<= cap)
@@ -1219,6 +1355,14 @@ class MHATokenToKVPool(KVCache):
                 num_warps=cfg["num_warps"],
                 num_stages=2,
             )
+        if self.k_cluster_ids is not None:
+            for layer_id in range(self.layer_num):
+                self.k_cluster_ids[layer_id][tgt_loc] = self.k_cluster_ids[
+                    layer_id
+                ][src_loc]
+                self.v_cluster_ids[layer_id][tgt_loc] = self.v_cluster_ids[
+                    layer_id
+                ][src_loc]
 
 
 class MHATokenToKVPoolFP4(MHATokenToKVPool):
