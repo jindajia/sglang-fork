@@ -6,4 +6,10 @@ ray
 word2number
 huggingface-hub>=0.25.0
 
+# KV rotation / kmeans
+flash-kmeans
+
+# lm_eval (used in kmeansworkflow.sh for Stage 1 KV cache dumping)
+lm_eval
+
 # Note: fast-hadamard-transform is installed after sglang (requires torch)

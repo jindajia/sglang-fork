@@ -1,10 +1,17 @@
+# Stage0 prepare environment and install dependencies
+bash setup_env.sh
+source /data/$USER/miniconda/bin/activate sglang_env
+conda activate sglang_env
+
+export HF_HOME=/data/shared/huggingface
+
 # Stage 1 dump kv cache
 
 # for example we want to dump kv cache for Qwen3-4B-Thinking-2507
 # Stage1.1 we need first start the server 
 export DUMP_KVCACHE=true
 export DUMP_KVCACHE_TOKENS=20000 # number of tokens to dump
-export DUMP_KVCACHE_DIR="path-we-want-to-save-kv-cache"
+export DUMP_KVCACHE_DIR="/data/jisenli2/kv-cache/Qwen3-4B-thinking-2507/mmlu_pro-20000-tokens/"
 mkdir -p $DUMP_KVCACHE_DIR
 CUDA_VISIBLE_DEVICES=0,1,2,3 python3 -m sglang.launch_server \
     --model-path Qwen/Qwen3-4B-Thinking-2507 \
@@ -26,6 +33,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python3 -m sglang.launch_server \
 # Stage1.2 then we need to send some sample requests to server to dump kv cache
 # for exmaple here I use tore-eval to send sample requests
 lm_eval --model local-completions --tasks mmlu_pro \
+    --limit 500 \
     --model_args model=Qwen/Qwen3-4B-Thinking-2507,base_url=http://localhost:30001/v1/completions,max_model_len=20000,num_concurrent=32,max_retries=1,tokenized_requests=False
 
 # Stage2 after finish with dump kv cache, we need to use dumped kv cache to calculate kmeans centroids
@@ -35,8 +43,11 @@ lm_eval --model local-completions --tasks mmlu_pro \
 
 # Stage3 run with kmeans serving
 # need to set KV Centroids path, and number of clusters
+# unset the DUMP_KVCACHE flag to avoid accidentally dumping kv cache again
+unset DUMP_KVCACHE
+export HF_HOME=/data/shared/huggingface
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-export SGLANG_KV_CENTROIDS_PATH=/data/jinda/kv-cache/Qwen3-4B-thinking-2507/c_64/
+export SGLANG_KV_CENTROIDS_PATH=/data/jisenli2/kv-cache/Qwen3-4B-thinking-2507/c_64/
 export N_CLUSTERS=64
 python3 -m sglang.launch_server \
     --model-path Qwen/Qwen3-4B-Thinking-2507 \
@@ -50,6 +61,7 @@ python3 -m sglang.launch_server \
     --prefill-attention-backend fa3 \
     --decode-attention-backend triton \
     --sampling-backend flashinfer \
-    --tensor-parallel-size 2 \
-    --data-parallel-size 4 \
-    --host 0.0.0.0 --port 30001
+    --tensor-parallel-size 1 \
+    --data-parallel-size 1 \
+    --host 0.0.0.0 --port 30001 \
+    2>&1 | tee /data/jisenli2/kv_rotation/sglang_stage3.log
