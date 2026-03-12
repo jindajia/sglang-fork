@@ -21,9 +21,17 @@ if TYPE_CHECKING:
     from sglang.srt.layers.radix_attention import RadixAttention
     from sglang.srt.model_executor.model_runner import ModelRunner
 
+import math
+import os
+
+from fast_hadamard_transform import hadamard_transform
 from sgl_kernel import merge_state_v2
 from sgl_kernel.flash_attn import flash_attn_varlen_func as flash_attn_varlen_func_fa3
 from sgl_kernel.flash_attn import flash_attn_with_kvcache as flash_attn_with_kvcache_fa3
+
+_hadamard_enabled = 1 if os.environ.get("HADAMARD", "0") in ("1", "true", "True") else 0
+_rotate_v_enabled = 1 if os.environ.get("ROTATE_V", "0") in ("1", "true", "True") else 0
+_hadamard_order = int(os.environ.get("HADAMARD_ORDER", "16"))
 
 flash_attn_varlen_func = flash_attn_varlen_func_fa3
 flash_attn_with_kvcache = flash_attn_with_kvcache_fa3
@@ -950,11 +958,29 @@ class FlashAttentionBackend(AttentionBackend):
                     if hasattr(kv_pool_prefill, "get_k_centroids")
                     else None
                 )
+                if _hadamard_enabled:
+                    orig_shape = k_centroids_ly.shape  # (a, b, c, d)
+                    k_centroids_ly = k_centroids_ly.view(
+                        *orig_shape[:-1],
+                        orig_shape[-1] // _hadamard_order,
+                        _hadamard_order,
+                    )
+                    k_centroids_ly = hadamard_transform(k_centroids_ly / math.sqrt(_hadamard_order))
+                    k_centroids_ly = k_centroids_ly.view(orig_shape)
                 v_centroids_ly = (
                     kv_pool_prefill.get_v_centroids(layer.layer_id)
                     if hasattr(kv_pool_prefill, "get_v_centroids")
                     else None
                 )
+                if _rotate_v_enabled:
+                    orig_shape = v_centroids_ly.shape  # (a, b, c, d)
+                    v_centroids_ly = v_centroids_ly.view(
+                        *orig_shape[:-1],
+                        orig_shape[-1] // _hadamard_order,
+                        _hadamard_order,
+                    )
+                    v_centroids_ly = hadamard_transform(v_centroids_ly / math.sqrt(_hadamard_order))
+                    v_centroids_ly = v_centroids_ly.view(orig_shape)
                 k_cid_buf = (
                     kv_pool_prefill.get_k_cluster_ids(layer.layer_id)
                     if hasattr(kv_pool_prefill, "get_k_cluster_ids")
@@ -988,6 +1014,17 @@ class FlashAttentionBackend(AttentionBackend):
                     k_cluster_ids=k_cid_buf,
                     v_cluster_ids=v_cid_buf,
                 )
+                if self.kv_cache_dtype_str == "int4" and _hadamard_enabled:
+                    q = q.contiguous().view(-1, layer.tp_q_head_num, layer.head_dim)
+                    hadamard_order = 16
+                    orig_shape = q.shape  # (a, b, c, d)
+                    q = q.view(
+                        *orig_shape[:-1],
+                        orig_shape[-1] // hadamard_order,
+                        hadamard_order,
+                    )
+                    q = hadamard_transform(q / math.sqrt(hadamard_order))
+                    q = q.view(orig_shape)
 
                 result = flash_attn_varlen_func(
                     q=q.contiguous().view(-1, layer.tp_q_head_num, layer.head_dim),
@@ -1003,6 +1040,20 @@ class FlashAttentionBackend(AttentionBackend):
                     softcap=layer.logit_cap,
                     **kwargs,
                 )
+                if (
+                    self.kv_cache_dtype_str == "int4"
+                    and _hadamard_enabled
+                    and _rotate_v_enabled
+                ):
+                    hadamard_order = 16
+                    orig_shape = result.shape  # (a, b, c, d)
+                    result = result.view(
+                        *orig_shape[:-1],
+                        orig_shape[-1] // hadamard_order,
+                        hadamard_order,
+                    )
+                    result = hadamard_transform(result / math.sqrt(hadamard_order))
+                    result = result.view(orig_shape)
             else:
                 key_cache, value_cache = forward_batch.token_to_kv_pool.get_kv_buffer(
                     layer.layer_id
