@@ -293,7 +293,7 @@ eval_single_model() {
         log_message "=========================================="
 
         for RUN_IDX in $(seq 1 $REPEAT); do
-            RUN_DIR="$RESULTS_DIR/${model_short_name}/${model_short_name}_${TASK_NAME}_${rot_suffix}/run${RUN_IDX}"
+            RUN_DIR="$RESULTS_DIR/${model_short_name}/${TASK_NAME}/${rot_suffix}/run${RUN_IDX}"
             mkdir -p "$RUN_DIR"
             log_message "  Run ${RUN_IDX}/${REPEAT} -> $RUN_DIR"
 
@@ -323,7 +323,7 @@ eval_single_model() {
 
         # Aggregate results across runs (only if repeat > 1)
         if [ $REPEAT -gt 1 ]; then
-            TASK_DIR="$RESULTS_DIR/${model_short_name}/${model_short_name}_${TASK_NAME}_${rot_suffix}"
+            TASK_DIR="$RESULTS_DIR/${model_short_name}/${TASK_NAME}/${rot_suffix}"
             log_message "Aggregating ${REPEAT} runs for $TASK_NAME..."
             "$PYTHON" - <<PYEOF
 import json, math, os

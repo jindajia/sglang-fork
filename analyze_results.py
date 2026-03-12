@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 analyze_results.py — Summarize eval_results into a Markdown report.
-Only processes tasks that have aggregated.json.
+Uses aggregated.json if present; otherwise collects values from runN/results.jsonl.
 Output: eval_results/summary.md
 """
 
@@ -72,34 +72,45 @@ def fmt(x):
 # Data loading
 # =============================================================================
 
+def parse_config_dir(config_dir):
+    """Return (model_name, task_key, config_key) or None if not recognized.
+
+    Supports two layouts:
+      new: eval_results/{model}/{task}/{config}/
+      old: eval_results/{model}/{model}_{task}_{config}/
+    """
+    # New layout: grandparent is model, parent is task
+    task_key = config_dir.parent.name
+    config_key = config_dir.name
+    model_name = config_dir.parent.parent.name
+    if task_key in TASK_PRIMARY_METRIC and config_key in CONFIG_KEY_TO_LABEL:
+        return model_name, task_key, config_key
+
+    # Old layout: parent is model, dir is {model}_{task}_{config}
+    model_name = config_dir.parent.name
+    dir_name = config_dir.name
+    prefix = model_name + "_"
+    if dir_name.startswith(prefix):
+        rest = dir_name[len(prefix):]
+        for t in TASK_PRIMARY_METRIC:
+            if rest.startswith(t + "_"):
+                config_key = rest[len(t) + 1:]
+                if config_key in CONFIG_KEY_TO_LABEL:
+                    return model_name, t, config_key
+
+    return None
+
+
 # Structure: data[model][task][config_key] = {"values": [...pct...], "avg": pct}
 data = defaultdict(lambda: defaultdict(dict))
 
+# --- Pass 1: aggregated.json (covers all runs at once) ---
 for agg_file in sorted(RESULTS_DIR.rglob("aggregated.json")):
-    # Path: eval_results/{model}/{model}_{task}_{config}/aggregated.json
     config_dir = agg_file.parent
-    model_dir  = config_dir.parent
-    model_name = model_dir.name
-
-    # Extract task and config from directory name: {model}_{task}_{config}
-    dir_name = config_dir.name
-    prefix = model_name + "_"
-    if not dir_name.startswith(prefix):
+    parsed = parse_config_dir(config_dir)
+    if parsed is None:
         continue
-    rest = dir_name[len(prefix):]  # e.g. "gpqa_think_baseline_bf16"
-
-    # Match known tasks
-    task_key = None
-    config_key = None
-    for t in TASK_PRIMARY_METRIC:
-        if rest.startswith(t + "_"):
-            task_key = t
-            config_key = rest[len(t) + 1:]
-            break
-    if task_key is None or config_key is None:
-        continue
-    if config_key not in CONFIG_KEY_TO_LABEL:
-        continue
+    model_name, task_key, config_key = parsed
 
     metric = TASK_PRIMARY_METRIC[task_key]
     agg = json.loads(agg_file.read_text())
@@ -112,6 +123,42 @@ for agg_file in sorted(RESULTS_DIR.rglob("aggregated.json")):
         "values": pct_values,
         "avg":    avg_of_rounded(pct_values),
     }
+
+# --- Pass 2: fallback to runN/results.jsonl for configs without aggregated.json ---
+for results_file in sorted(RESULTS_DIR.rglob("results.jsonl")):
+    # New: eval_results/{model}/{task}/{config}/runN/results.jsonl
+    # Old: eval_results/{model}/{model}_{task}_{config}/runN/results.jsonl
+    run_dir    = results_file.parent
+    config_dir = run_dir.parent
+    parsed = parse_config_dir(config_dir)
+    if parsed is None:
+        continue
+    model_name, task_key, config_key = parsed
+
+    # Skip if already populated by aggregated.json
+    if config_key in data[model_name][task_key]:
+        continue
+
+    metric = TASK_PRIMARY_METRIC[task_key]
+    try:
+        obj = json.loads(results_file.read_text().strip().splitlines()[0])
+        metrics = obj.get("metrics", {})
+        if metric not in metrics:
+            continue
+        raw_value = metrics[metric]
+    except Exception:
+        continue
+
+    # Accumulate values across runs; will finalize after scanning all files
+    bucket = data[model_name][task_key].setdefault(config_key, {"values": [], "avg": None})
+    bucket["values"].append(pct(raw_value))
+
+# Finalize avg for fallback entries
+for model_name in data:
+    for task_key in data[model_name]:
+        for config_key, entry in data[model_name][task_key].items():
+            if entry["avg"] is None and entry["values"]:
+                entry["avg"] = avg_of_rounded(entry["values"])
 
 # =============================================================================
 # Markdown generation
