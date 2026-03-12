@@ -19,7 +19,7 @@ import sys
 from datasets import load_dataset
 
 out_path = sys.argv[1]
-ds = load_dataset("math-ai/aime25", split="train")
+ds = load_dataset("math-ai/aime25", split="test")
 converted = ds.map(
     lambda x: {
         "prompt": x["problem"] + "\nPlease reason step by step, and put your final answer within \\boxed{}.",
