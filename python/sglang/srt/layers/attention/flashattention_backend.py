@@ -1016,7 +1016,7 @@ class FlashAttentionBackend(AttentionBackend):
                 )
                 if self.kv_cache_dtype_str == "int4" and _hadamard_enabled:
                     q = q.contiguous().view(-1, layer.tp_q_head_num, layer.head_dim)
-                    hadamard_order = 16
+                    hadamard_order = _hadamard_order
                     orig_shape = q.shape  # (a, b, c, d)
                     q = q.view(
                         *orig_shape[:-1],
@@ -1045,7 +1045,7 @@ class FlashAttentionBackend(AttentionBackend):
                     and _hadamard_enabled
                     and _rotate_v_enabled
                 ):
-                    hadamard_order = 16
+                    hadamard_order = _hadamard_order
                     orig_shape = result.shape  # (a, b, c, d)
                     result = result.view(
                         *orig_shape[:-1],
