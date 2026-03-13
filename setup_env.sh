@@ -45,7 +45,7 @@ ln -sfn "$CONDA_ENV_DIR/targets/x86_64-linux/include"     "$CONDA_ENV_DIR/cuda-h
 ln -sfn "$CONDA_ENV_DIR/targets/x86_64-linux/lib"         "$CONDA_ENV_DIR/cuda-home/lib64"
 
 echo "=== Installing base build dependencies ==="
-"$CONDA_ENV_DIR/bin/pip" install grpcio-tools numpy packaging ninja -q
+"$CONDA_ENV_DIR/bin/pip" install grpcio-tools numpy packaging ninja ipykernel -q
 
 echo "=== Installing requirements-eval.txt (ray, word2number, flash-kmeans, lm_eval, ...) ==="
 "$CONDA_ENV_DIR/bin/pip" install -r "$SCRIPT_DIR/requirements-eval.txt" -q

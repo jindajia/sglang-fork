@@ -44,10 +44,10 @@ declare -A MODEL_NUM_LAYERS=(
 #
 MODEL_CONFIGS=(
     # model                              |clusters|dump_gpus|dtp|dep|ddp|kmeans_gpu
-    "Qwen/Qwen3-4B-Thinking-2507        |1      |0,1  |2  |1  |1  |0,1"
-    "Qwen/Qwen3-4B-Thinking-2507        |16      |2,3  |2  |1  |1  |2,3"
-    "Qwen/Qwen3-4B-Thinking-2507        |256      |4,5  |2  |1  |1  |4,5"
-    "Qwen/Qwen3-4B-Thinking-2507        |2048      |6,7  |2  |1  |1  |6,7"
+    "Qwen/Qwen3-4B-Thinking-2507        |256      |0,1  |2  |1  |1  |0,1"
+    # "Qwen/Qwen3-4B-Thinking-2507        |16      |2,3  |2  |1  |1  |2,3"
+    # "Qwen/Qwen3-4B-Thinking-2507        |256      |4,5  |2  |1  |1  |4,5"
+    # "Qwen/Qwen3-4B-Thinking-2507        |2048      |6,7  |2  |1  |1  |6,7"
     # "Qwen/Qwen3-8B                      |64      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7"
 )
 
@@ -56,7 +56,7 @@ MODEL_CONFIGS=(
 # =============================================================================
 TASK="mmlu_pro"
 LIMIT=16          # per subtask; mmlu_pro has 14 subtasks → 16×14≈224 total
-DUMP_TOKENS=20000
+DUMP_TOKENS=10000
 BASE_PORT=30001
 
 KV_BASE="${KV_BASE:-/data/jisenli2/kv-cache}"
