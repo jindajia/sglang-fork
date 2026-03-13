@@ -29,8 +29,16 @@ from sglang.srt.utils import (
 
 try:
     from flash_kmeans import _euclid_iter_compiled
-except Exception:
-    _euclid_iter_compiled = None
+    assert _euclid_iter_compiled is not None, (
+        "flash_kmeans was imported but _euclid_iter_compiled is None. "
+        "Triton kernels may not have been compiled. "
+        "Please reinstall flash-kmeans: pip install git+https://github.com/jindajia/flash-kmeans"
+    )
+except Exception as e:
+    raise ImportError(
+        "Failed to import flash_kmeans. "
+        "Please install it via: pip install git+https://github.com/jindajia/flash-kmeans"
+    ) from e
 
 if TYPE_CHECKING:
     from sglang.srt.layers.radix_attention import RadixAttention
