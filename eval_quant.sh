@@ -1,5 +1,5 @@
 #!/bin/bash
-# eval_kmeans.sh — SGLang evaluation with optional K-means centroid pipeline
+# eval_quant.sh — SGLang evaluation with optional K-means centroid pipeline
 #
 # Extends seq_eval_kv_rotation.sh with a new KMEANS mode:
 #   BASE  — baseline, no rotation, no kmeans  (Stage 3 only)
@@ -19,6 +19,14 @@
 #        Otherwise move on immediately (parallel on non-overlapping GPUs).
 
 set -eo pipefail
+
+cleanup() {
+    echo ""
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] Interrupted — killing all child processes..."
+    kill -- -$$ 2>/dev/null || true
+    exit 130
+}
+trap cleanup INT TERM
 
 # =============================================================================
 # Model Configs
@@ -54,14 +62,26 @@ set -eo pipefail
 TASKS_ALL="gpqa_think:5,humaneval_think:5,aime25_think:5,math_500_think:5"
 TASKS_ONCE="gpqa_think:1,humaneval_think:1,aime25_think:1,math_500_think:1"
 
+# =============================================================================
+# Model → num_layers lookup table
+# Add new models here. Script will error if a MODEL_CONFIGS entry is not found.
+# =============================================================================
+declare -A MODEL_NUM_LAYERS=(
+    ["Qwen/Qwen3-4B-Thinking-2507"]=36
+    ["Qwen/Qwen3-8B"]=36
+)
+
 MODEL_CONFIGS=(
-    # mode  |h|rv|ho |dtype|model                        |layers|clusters|dump_gpus|dtp|dep|ddp|kgpu|eval_gpus          |etp|eep|edp|tasks
-    "BASE  |0|0|0  |BF16|Qwen/Qwen3-4B-Thinking-2507|36|0 |0        |1  |1  |1  |0   |0                  |1  |1  |1  |${TASKS_ALL}"
-    "BASE  |0|0|0  |INT4|Qwen/Qwen3-4B-Thinking-2507|36|0 |0        |1  |1  |1  |0   |1                  |1  |1  |1  |${TASKS_ONCE}"
-    "QUANT |1|0|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|36|0 |0        |1  |1  |1  |0   |2                  |1  |1  |1  |${TASKS_ALL}"
-    "QUANT |1|1|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|36|0 |0        |1  |1  |1  |0   |3                  |1  |1  |1  |${TASKS_ALL}"
-    "KMEANS|1|0|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|36|64|0,1,2,3  |4  |1  |1  |0   |0,1,2,3,4,5,6,7   |2  |1  |4  |${TASKS_ALL}"
-    "KMEANS|1|1|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|36|64|0,1,2,3  |4  |1  |1  |0   |0,1,2,3,4,5,6,7   |2  |1  |4  |${TASKS_ALL}"
+    # mode  |h|rv|ho |dtype|model                   |clusters|dump_gpus|dtp|dep|ddp|kmeans_gpu     |eval_gpus|etp|eep|edp|tasks
+    # "BASE  |0|0|0  |BF16|Qwen/Qwen3-4B-Thinking-2507|0 |0        |1  |1  |1  |0   |0                |1  |1  |1  |${TASKS_ALL}"
+    # "BASE  |0|0|0  |INT4|Qwen/Qwen3-4B-Thinking-2507|0 |0        |1  |1  |1  |0   |1                |1  |1  |1  |${TASKS_ONCE}"
+    # "QUANT |1|0|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|0 |0        |1  |1  |1  |0   |2                |1  |1  |1  |${TASKS_ALL}"
+    # "QUANT |1|1|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|0 |0        |1  |1  |1  |0   |3                |1  |1  |1  |${TASKS_ALL}"
+    "KMEANS|0|0|0 |INT4|Qwen/Qwen3-4B-Thinking-2507|64      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|0,1      |2  |1  |1  |gpqa_think:1"
+    "KMEANS|1|0|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|64      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|2,3      |2  |1  |1  |gpqa_think:1"
+    "KMEANS|0|0|0 |INT4|Qwen/Qwen3-8B|64      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|4,5      |2  |1  |1  |gpqa_think:1"
+    # "KMEANS|1|0|16 |INT4|Qwen/Qwen3-8B|64      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|6,7      |2  |1  |1  |gpqa_think:1"
+    # "KMEANS|1|1|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|64|0,1,2,3  |4  |1  |1  |0   |0,1,2,3,4,5,6,7 |2  |1  |4  |${TASKS_ALL}"
 )
 
 # =============================================================================
@@ -72,7 +92,7 @@ NUM_WORKERS=64
 
 # Stage 1 (KMEANS only): lm_eval task(s) to trigger KV cache dump
 DUMP_LM_EVAL_TASKS="mmlu_pro"
-DUMP_LM_EVAL_LIMIT=500
+DUMP_LM_EVAL_LIMIT=16   # per subtask; mmlu_pro has 14 subtasks → 16×14≈224 total
 DUMP_TOKENS=20000
 
 # Base directory for KV dump files and centroids
@@ -80,8 +100,8 @@ KV_DUMP_BASE="${KV_DUMP_BASE:-/data/jisenli2/kv-cache}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TORE_EVAL_DIR="$SCRIPT_DIR/tore-eval"
-RESULTS_DIR="$SCRIPT_DIR/eval_results_kmeans"
-LOGS_DIR="$SCRIPT_DIR/eval_logs_kmeans"
+RESULTS_DIR="$SCRIPT_DIR/eval_results"
+LOGS_DIR="$SCRIPT_DIR/eval_logs"
 
 export HF_HOME=/data/shared/huggingface
 
@@ -166,7 +186,9 @@ wait_for_gpus_free() {
         sleep "$GPU_POLL_INTERVAL"
         waited=$((waited + GPU_POLL_INTERVAL))
     done
-    [ "$waited" -gt 0 ] && echo "[$(date '+%Y-%m-%d %H:%M:%S')] GPU(s) [$gpu_list] now free after $((waited / 60))min"
+    if [ "$waited" -gt 0 ]; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] GPU(s) [$gpu_list] now free after $((waited / 60))min"
+    fi
 }
 
 # =============================================================================
@@ -177,8 +199,9 @@ run_stage1_dump() {
     local model_name="$1" num_layers="$2" dump_gpus="$3" dump_tp="$4" dump_ep="$5" dump_dp="$6" dump_port="$7"
     local model_short dump_dir
     model_short="$(extract_model_short_name "$model_name")"
-    dump_dir="${KV_DUMP_BASE}/${model_short}/dump"
-    mkdir -p "$dump_dir" "$LOGS_DIR/stage1"
+    # Path: {KV_DUMP_BASE}/{model_short}/{task}-{dump_tokens}-tokens/
+    dump_dir="${KV_DUMP_BASE}/${model_short}/${DUMP_LM_EVAL_TASKS}-${DUMP_TOKENS}-tokens"
+    mkdir -p "$dump_dir" "$LOGS_DIR/dump/${model_short}"
 
     log_message "--- Stage 1: Dump KV Cache ---"
     log_message "  GPUs: $dump_gpus (TP=$dump_tp EP=$dump_ep DP=$dump_dp, port=$dump_port)"
@@ -197,7 +220,7 @@ run_stage1_dump() {
     fi
 
     local server_log
-    server_log=$(unique_log_path "$LOGS_DIR/stage1/${model_short}_server.log")
+    server_log=$(unique_log_path "$LOGS_DIR/dump/${model_short}/stage1_server.log")
 
     DUMP_KVCACHE=true \
     DUMP_KVCACHE_TOKENS=$DUMP_TOKENS \
@@ -236,7 +259,7 @@ run_stage1_dump() {
     fi
 
     local lm_eval_log
-    lm_eval_log=$(unique_log_path "$LOGS_DIR/stage1/${model_short}_lm_eval.log")
+    lm_eval_log=$(unique_log_path "$LOGS_DIR/dump/${model_short}/stage1_${DUMP_LM_EVAL_TASKS}_${DUMP_TOKENS}_lm_eval.log")
     log_message "Running lm_eval ($DUMP_LM_EVAL_TASKS)..."
     set +e
     CUDA_VISIBLE_DEVICES="" \
@@ -271,9 +294,9 @@ run_stage2_kmeans() {
     local model_name="$1" num_layers="$2" n_clusters="$3" kmeans_gpu="$4"
     local model_short dump_dir centroids_dir
     model_short="$(extract_model_short_name "$model_name")"
-    dump_dir="${KV_DUMP_BASE}/${model_short}/dump"
-    centroids_dir="${KV_DUMP_BASE}/${model_short}/c_${n_clusters}"
-    mkdir -p "$centroids_dir" "$LOGS_DIR/stage2"
+    dump_dir="${KV_DUMP_BASE}/${model_short}/${DUMP_LM_EVAL_TASKS}-${DUMP_TOKENS}-tokens"
+    centroids_dir="${dump_dir}/c_${n_clusters}"
+    mkdir -p "$centroids_dir" "$LOGS_DIR/dump/${model_short}"
 
     log_message "--- Stage 2: K-means (n_clusters=$n_clusters, GPU=$kmeans_gpu) ---"
     log_message "  Dump dir: $dump_dir  ->  $centroids_dir"
@@ -292,7 +315,7 @@ run_stage2_kmeans() {
     fi
 
     local kmeans_log
-    kmeans_log=$(unique_log_path "$LOGS_DIR/stage2/${model_short}_c${n_clusters}.log")
+    kmeans_log=$(unique_log_path "$LOGS_DIR/dump/${model_short}/stage2_c${n_clusters}.log")
     log_message "Running K-means... (log: $kmeans_log)"
 
     CUDA_VISIBLE_DEVICES=$kmeans_gpu \
@@ -369,9 +392,13 @@ eval_single_model() {
     if [[ "$mode" == "BASE" ]]; then
         rot_suffix="baseline_${kv_dtype_lower}"
     elif [[ "$mode" == "QUANT" ]]; then
-        rot_suffix="quant_${kv_dtype_lower}_h${hadamard}_rv${rotate_v}_ho${hadamard_order}"
+        rot_suffix="quant_${kv_dtype_lower}_${hadamard}_${rotate_v}_${hadamard_order}"
     else
-        rot_suffix="kmeans_${n_clusters}_h${hadamard}_rv${rotate_v}_ho${hadamard_order}"
+        if [[ "$hadamard" == "0" && "$rotate_v" == "0" ]]; then
+            rot_suffix="kmeans_${n_clusters}"
+        else
+            rot_suffix="kmeans_quant_${n_clusters}_${kv_dtype_lower}_${hadamard}_${rotate_v}_${hadamard_order}"
+        fi
     fi
 
     mkdir -p "$LOGS_DIR/batch_logs/${model_short}" "$LOGS_DIR/inference_logs/${model_short}"
@@ -390,10 +417,23 @@ eval_single_model() {
 
     # ------------------------------------------------------------------
     # Stage 1 & 2: KMEANS mode only
+    # Check if centroids already exist (num_layers * 2 .pt files).
+    # If not, delegate to dump_centroids.sh (idempotent) instead of
+    # running Stage 1/2 inline — avoids duplicate server starts.
     # ------------------------------------------------------------------
     if [[ "$mode" == "KMEANS" ]]; then
-        run_stage1_dump   "$model_name" "$num_layers" "$dump_gpus" "$dump_tp" "$dump_ep" "$dump_dp" "$dump_port"
-        run_stage2_kmeans "$model_name" "$num_layers" "$n_clusters" "$kmeans_gpu"
+        local _cdir="${KV_DUMP_BASE}/$(extract_model_short_name "$model_name")/${DUMP_LM_EVAL_TASKS}-${DUMP_TOKENS}-tokens/c_${n_clusters}"
+        local _expected=$((num_layers * 2))
+        local _actual
+        _actual=$(ls "${_cdir}"/*.pt 2>/dev/null | wc -l)
+
+        if [ "$_actual" -ge "$_expected" ]; then
+            log_message "✓ Centroids already complete ($_actual/${_expected} files): $_cdir"
+        else
+            log_message "Centroids incomplete ($_actual/${_expected}), running Stage 1 & 2..."
+            run_stage1_dump "$model_name" "$num_layers" "$dump_gpus" "$dump_tp" "$dump_ep" "$dump_dp" "$dump_port"
+            run_stage2_kmeans "$model_name" "$num_layers" "$n_clusters" "$kmeans_gpu"
+        fi
     fi
 
     # ------------------------------------------------------------------
@@ -408,7 +448,9 @@ eval_single_model() {
     SERVER_LOG=$(unique_log_path "$LOGS_DIR/inference_logs/${model_short}/${rot_suffix}_server.log")
 
     local centroids_path=""
-    [[ "$mode" == "KMEANS" ]] && centroids_path="${KV_DUMP_BASE}/$(extract_model_short_name "$model_name")/c_${n_clusters}"
+    if [[ "$mode" == "KMEANS" ]]; then
+        centroids_path="${KV_DUMP_BASE}/$(extract_model_short_name "$model_name")/${DUMP_LM_EVAL_TASKS}-${DUMP_TOKENS}-tokens/c_${n_clusters}"
+    fi
 
     HADAMARD=$hadamard \
     ROTATE_V=$rotate_v \
@@ -472,6 +514,8 @@ eval_single_model() {
 
             cd "$SCRIPT_DIR"
             set +e
+            OPENAI_LOG=warning \
+            HTTPX_LOG_LEVEL=warning \
             "$PYTHON" -m tore_eval.eval \
                 --framework preset \
                 --preset_name "$TASK_NAME" \
@@ -556,18 +600,21 @@ PYEOF
 # Preflight checks
 # =============================================================================
 
-if [ ! -f "$PYTHON" ]; then
-    echo "ERROR: Python not found at $PYTHON"
-    echo "       Run ./setup_env.sh first to create the '$CONDA_ENV_NAME' environment."
-    exit 1
-fi
-
+# 1. tore-eval submodule initialized
 if [ ! -f "$TORE_EVAL_DIR/setup.py" ] && [ ! -f "$TORE_EVAL_DIR/pyproject.toml" ]; then
     echo "ERROR: tore-eval submodule not initialized."
     echo "       Run: git submodule update --init --recursive"
     exit 1
 fi
 
+# 2. conda env exists
+if [ ! -f "$PYTHON" ]; then
+    echo "ERROR: conda env '$CONDA_ENV_NAME' not found (expected Python at $PYTHON)."
+    echo "       Run: bash setup_env.sh"
+    exit 1
+fi
+
+# 3. datasets
 bash "$SCRIPT_DIR/prepare_datasets.sh" "$PYTHON" "$SCRIPT_DIR"
 
 # =============================================================================
@@ -593,7 +640,7 @@ for i in "${!MODEL_CONFIGS[@]}"; do
     config="${MODEL_CONFIGS[$i]}"
     # Strip whitespace from each field (allows aligned formatting in MODEL_CONFIGS)
     IFS='|' read -r mode hadamard rotate_v hadamard_order kv_dtype model_name \
-                    num_layers n_clusters \
+                    n_clusters \
                     dump_gpus dump_tp dump_ep dump_dp \
                     kmeans_gpu \
                     gpu_devices tp_size ep_size dp_size tasks <<< "$config"
@@ -603,8 +650,15 @@ for i in "${!MODEL_CONFIGS[@]}"; do
     hadamard_order="${hadamard_order// /}"
     kv_dtype="${kv_dtype// /}"
     model_name="${model_name// /}"
-    num_layers="${num_layers// /}"
     n_clusters="${n_clusters// /}"
+
+    # Lookup num_layers from table; error if model not registered
+    num_layers="${MODEL_NUM_LAYERS[$model_name]}"
+    if [[ -z "$num_layers" ]]; then
+        echo "ERROR: model '$model_name' not found in MODEL_NUM_LAYERS table."
+        echo "       Add it at the top of this script and retry."
+        exit 1
+    fi
     dump_gpus="${dump_gpus// /}"
     dump_tp="${dump_tp// /}"
     dump_ep="${dump_ep// /}"
@@ -621,9 +675,13 @@ for i in "${!MODEL_CONFIGS[@]}"; do
     if [[ "$mode" == "BASE" ]]; then
         rot_suffix="baseline_${kv_dtype_lower}"
     elif [[ "$mode" == "QUANT" ]]; then
-        rot_suffix="quant_${kv_dtype_lower}_h${hadamard}_rv${rotate_v}_ho${hadamard_order}"
+        rot_suffix="quant_${kv_dtype_lower}_${hadamard}_${rotate_v}_${hadamard_order}"
     else
-        rot_suffix="kmeans_${n_clusters}_h${hadamard}_rv${rotate_v}_ho${hadamard_order}"
+        if [[ "$hadamard" == "0" && "$rotate_v" == "0" ]]; then
+            rot_suffix="kmeans_${n_clusters}"
+        else
+            rot_suffix="kmeans_quant_${n_clusters}_${kv_dtype_lower}_${hadamard}_${rotate_v}_${hadamard_order}"
+        fi
     fi
 
     server_port=$((BASE_PORT + i))
@@ -647,7 +705,7 @@ for i in "${!MODEL_CONFIGS[@]}"; do
     # If next config shares any GPU, wait for current job to finish first
     next=$((i + 1))
     if [ "$next" -lt "$N" ]; then
-        next_gpu=$(echo "${MODEL_CONFIGS[$next]}" | cut -d'|' -f14 | tr -d ' ')
+        next_gpu=$(echo "${MODEL_CONFIGS[$next]}" | cut -d'|' -f13 | tr -d ' ')
         overlap=0
         IFS=',' read -ra CUR_GPUS <<< "$gpu_devices"
         IFS=',' read -ra NXT_GPUS <<< "$next_gpu"

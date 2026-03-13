@@ -11,7 +11,7 @@ export HF_HOME=/data/shared/huggingface
 # Stage1.1 we need first start the server 
 export DUMP_KVCACHE=true
 export DUMP_KVCACHE_TOKENS=20000 # number of tokens to dump
-export DUMP_KVCACHE_DIR="/data/jisenli2/kv-cache/Qwen3-4B-thinking-2507/mmlu_pro-20000-tokens/"
+export DUMP_KVCACHE_DIR="/data/jisenli2/kv-cache/Qwen3-4B-Thinking-2507/mmlu_pro-20000-tokens/"
 mkdir -p $DUMP_KVCACHE_DIR
 CUDA_VISIBLE_DEVICES=0,1,2,3 python3 -m sglang.launch_server \
     --model-path Qwen/Qwen3-4B-Thinking-2507 \
@@ -47,7 +47,7 @@ lm_eval --model local-completions --tasks mmlu_pro \
 unset DUMP_KVCACHE
 export HF_HOME=/data/shared/huggingface
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-export SGLANG_KV_CENTROIDS_PATH=/data/jisenli2/kv-cache/Qwen3-4B-thinking-2507/c_64/
+export SGLANG_KV_CENTROIDS_PATH=/data/jisenli2/kv-cache/Qwen3-4B-Thinking-2507/mmlu_pro-20000-tokens/c_64/
 export N_CLUSTERS=64
 python3 -m sglang.launch_server \
     --model-path Qwen/Qwen3-4B-Thinking-2507 \
@@ -64,4 +64,9 @@ python3 -m sglang.launch_server \
     --tensor-parallel-size 1 \
     --data-parallel-size 1 \
     --host 0.0.0.0 --port 30001 \
-    2>&1 | tee /data/jisenli2/kv_rotation/sglang_stage3.log
+    2>&1 | tee /data/jisenli2/kv_rotation/sglang_stage3_TP1.log
+
+curl http://localhost:30001/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{"model": "Qwen/Qwen3-4B-Thinking-2507", "messages": [{"role": "user", "content": "who are you"}], "max_tokens": 100}' \
+    2>&1 | tee -a /data/jisenli2/kv_rotation/sglang_stage3_TP4_output.log

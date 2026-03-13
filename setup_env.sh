@@ -60,9 +60,23 @@ PATH="$CONDA_ENV_DIR/nvvm/bin:$CONDA_ENV_DIR/bin:/usr/bin:$PATH" \
     "git+https://github.com/Dao-AILab/fast-hadamard-transform.git" \
     --no-build-isolation -q
 
+echo "=== Installing flash-kmeans (jindajia fork, required for _euclid_iter_compiled) ==="
+"$CONDA_ENV_DIR/bin/pip" install --force-reinstall --no-deps \
+    "git+https://github.com/jindajia/flash-kmeans" -q
+
+echo "=== Initializing tore-eval submodule ==="
+git -C "$SCRIPT_DIR" submodule update --init --recursive
+TORE_EVAL_BRANCH="jisen/kv_rotation_eval"
+current_branch=$(git -C "$TORE_EVAL_DIR" symbolic-ref --short HEAD 2>/dev/null || true)
+if [ "$current_branch" != "$TORE_EVAL_BRANCH" ]; then
+    echo "  Checking out tore-eval branch '$TORE_EVAL_BRANCH'..."
+    git -C "$TORE_EVAL_DIR" checkout "$TORE_EVAL_BRANCH"
+fi
+echo "  tore-eval branch: $(git -C "$TORE_EVAL_DIR" symbolic-ref --short HEAD)"
+
 echo "=== Installing tore-eval (editable) ==="
 if [ ! -f "$TORE_EVAL_DIR/setup.py" ] && [ ! -f "$TORE_EVAL_DIR/pyproject.toml" ]; then
-    echo "ERROR: tore-eval submodule not initialized. Run: git submodule update --init --recursive"
+    echo "ERROR: tore-eval pyproject.toml not found after submodule init."
     exit 1
 fi
 rm -rf "$TORE_EVAL_DIR/src/tore_eval.egg-info" 2>/dev/null || true
