@@ -335,13 +335,13 @@ for layer_id in range(num_layers):
     T, H, D = data["k"].shape
 
     k = data["k"].flatten().view(T, -1)[None, ...].to("cuda:0")
-    _, k_centers, k_iters = batch_kmeans_Euclid(k, n_clusters=n_clusters, max_iters=200, tol=1e-4, verbose=False, use_heuristic=True)
+    _, k_centers, k_iters = batch_kmeans_Euclid(k, n_clusters=n_clusters, max_iters=200, tol=1e-4, verbose=False, use_heuristic=False)
     k_centers = k_centers.squeeze(0)
     torch.save(k_centers, os.path.join(save_dir, f"k_layer_{layer_id}_clusters_{n_clusters}_centers.pt"))
     print(f"  k: shape={k_centers.shape}, iters={k_iters}", flush=True)
 
     v = data["v"].flatten().view(T, -1)[None, ...].to("cuda:0")
-    _, v_centers, v_iters = batch_kmeans_Euclid(v, n_clusters=n_clusters, max_iters=200, tol=1e-4, verbose=False, use_heuristic=True)
+    _, v_centers, v_iters = batch_kmeans_Euclid(v, n_clusters=n_clusters, max_iters=200, tol=1e-4, verbose=False, use_heuristic=False)
     v_centers = v_centers.squeeze(0)
     torch.save(v_centers, os.path.join(save_dir, f"v_layer_{layer_id}_clusters_{n_clusters}_centers.pt"))
     print(f"  v: shape={v_centers.shape}, iters={v_iters}", flush=True)
