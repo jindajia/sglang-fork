@@ -44,10 +44,10 @@ declare -A MODEL_NUM_LAYERS=(
 #
 MODEL_CONFIGS=(
     # model                              |clusters|dump_gpus|dtp|dep|ddp|kmeans_gpu
-    "Qwen/Qwen3-4B-Thinking-2507        |256      |0,1  |2  |1  |1  |0,1"
-    # "Qwen/Qwen3-4B-Thinking-2507        |16      |2,3  |2  |1  |1  |2,3"
-    # "Qwen/Qwen3-4B-Thinking-2507        |256      |4,5  |2  |1  |1  |4,5"
-    # "Qwen/Qwen3-4B-Thinking-2507        |2048      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7"
+    "Qwen/Qwen3-4B-Thinking-2507        |1      |0,1  |2  |1  |1  |0,1"
+    "Qwen/Qwen3-4B-Thinking-2507        |16      |2,3  |2  |1  |1  |2,3"
+    "Qwen/Qwen3-4B-Thinking-2507        |256      |4,5  |2  |1  |1  |4,5"
+    "Qwen/Qwen3-4B-Thinking-2507        |2048      |6,7  |2  |1  |1  |6,7"
     # "Qwen/Qwen3-8B                      |64      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7"
 )
 
@@ -305,7 +305,8 @@ echo "[$(date '+%Y-%m-%d %H:%M:%S')] KV base : $KV_BASE"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] =========================================="
 echo ""
 
-OVERALL_EXIT=0
+PIDS=()
+CONFIG_LABELS=()
 for i in "${!MODEL_CONFIGS[@]}"; do
     config="${MODEL_CONFIGS[$i]}"
     IFS='|' read -r model_name n_clusters dump_gpus dump_tp dump_ep dump_dp kmeans_gpu <<< "$config"
@@ -318,10 +319,24 @@ for i in "${!MODEL_CONFIGS[@]}"; do
     kmeans_gpu="${kmeans_gpu// /}"
 
     port=$((BASE_PORT + i))
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$((i+1))/${#MODEL_CONFIGS[@]}] $(basename "$model_name")  clusters=$n_clusters  port=$port"
+    label="$(basename "$model_name") clusters=$n_clusters port=$port"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [$((i+1))/${#MODEL_CONFIGS[@]}] Launching: $label"
 
-    if ! run_dump_config "$model_name" "$n_clusters" "$dump_gpus" "$dump_tp" "$dump_ep" "$dump_dp" "$kmeans_gpu" "$port"; then
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✗ Failed: $(basename "$model_name")"
+    run_dump_config "$model_name" "$n_clusters" "$dump_gpus" "$dump_tp" "$dump_ep" "$dump_dp" "$kmeans_gpu" "$port" &
+    PIDS+=($!)
+    CONFIG_LABELS+=("$label")
+done
+
+echo ""
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] All ${#PIDS[@]} configs launched in parallel. Waiting..."
+echo ""
+
+OVERALL_EXIT=0
+for i in "${!PIDS[@]}"; do
+    if wait "${PIDS[$i]}"; then
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✓ Done    : ${CONFIG_LABELS[$i]}"
+    else
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✗ Failed  : ${CONFIG_LABELS[$i]}"
         OVERALL_EXIT=1
     fi
 done

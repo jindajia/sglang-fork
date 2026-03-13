@@ -77,9 +77,21 @@ MODEL_CONFIGS=(
     # "BASE  |0|0|0  |INT4|Qwen/Qwen3-4B-Thinking-2507|0 |0        |1  |1  |1  |0   |1                |1  |1  |1  |${TASKS_ONCE}"
     # "QUANT |1|0|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|0 |0        |1  |1  |1  |0   |2                |1  |1  |1  |${TASKS_ALL}"
     # "QUANT |1|1|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|0 |0        |1  |1  |1  |0   |3                |1  |1  |1  |${TASKS_ALL}"
-    "KMEANS|0|0|0 |INT4|Qwen/Qwen3-4B-Thinking-2507|64      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|0,1      |2  |1  |1  |gpqa_think:1"
-    "KMEANS|1|0|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|64      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|2,3      |2  |1  |1  |gpqa_think:1"
-    "KMEANS|0|0|0 |INT4|Qwen/Qwen3-8B|64      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|4,5      |2  |1  |1  |gpqa_think:1"
+    # Round 1 — 4 GPU groups in parallel (hadamard_order=16)
+    "KMEANS|1|0|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|1      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|0,1      |2  |1  |1  |${TASKS_ONCE}"
+    "KMEANS|1|0|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|16      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|2,3      |2  |1  |1  |${TASKS_ONCE}"
+    "KMEANS|1|0|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|256      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|4,5      |2  |1  |1  |${TASKS_ONCE}"
+    "KMEANS|1|0|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|2048      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|6,7      |2  |1  |1  |${TASKS_ONCE}"
+    # Round 2 — hadamard_order=64
+    "KMEANS|1|0|64 |INT4|Qwen/Qwen3-4B-Thinking-2507|1      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|0,1      |2  |1  |1  |${TASKS_ONCE}"
+    "KMEANS|1|0|64 |INT4|Qwen/Qwen3-4B-Thinking-2507|16      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|2,3      |2  |1  |1  |${TASKS_ONCE}"
+    "KMEANS|1|0|64 |INT4|Qwen/Qwen3-4B-Thinking-2507|256      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|4,5      |2  |1  |1  |${TASKS_ONCE}"
+    "KMEANS|1|0|64 |INT4|Qwen/Qwen3-4B-Thinking-2507|2048      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|6,7      |2  |1  |1  |${TASKS_ONCE}"
+    # Round 3 — hadamard_order=128
+    "KMEANS|1|0|128 |INT4|Qwen/Qwen3-4B-Thinking-2507|1      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|0,1      |2  |1  |1  |${TASKS_ONCE}"
+    "KMEANS|1|0|128 |INT4|Qwen/Qwen3-4B-Thinking-2507|16      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|2,3      |2  |1  |1  |${TASKS_ONCE}"
+    "KMEANS|1|0|128 |INT4|Qwen/Qwen3-4B-Thinking-2507|256      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|4,5      |2  |1  |1  |${TASKS_ONCE}"
+    "KMEANS|1|0|128 |INT4|Qwen/Qwen3-4B-Thinking-2507|2048      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|6,7      |2  |1  |1  |${TASKS_ONCE}"
     # "KMEANS|1|0|16 |INT4|Qwen/Qwen3-8B|64      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|6,7      |2  |1  |1  |gpqa_think:1"
     # "KMEANS|1|1|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|64|0,1,2,3  |4  |1  |1  |0   |0,1,2,3,4,5,6,7 |2  |1  |4  |${TASKS_ALL}"
 )
@@ -104,6 +116,11 @@ RESULTS_DIR="$SCRIPT_DIR/eval_results"
 LOGS_DIR="$SCRIPT_DIR/eval_logs"
 
 export HF_HOME=/data/shared/huggingface
+# Load HF token for private dataset access
+if [ -z "$HUGGING_FACE_HUB_TOKEN" ] && [ -f "$HOME/.cache/huggingface/token" ]; then
+    export HUGGING_FACE_HUB_TOKEN="$(cat "$HOME/.cache/huggingface/token")"
+fi
+export HF_TOKEN="$HUGGING_FACE_HUB_TOKEN"
 
 CONDA_BASE="/data/jisenli2/miniconda"
 CONDA_ENV_NAME="sglang_env"
@@ -614,6 +631,25 @@ if [ ! -f "$PYTHON" ]; then
     exit 1
 fi
 
+# 3. HuggingFace auth (needed for togethercomputer/* private datasets)
+_hf_ok=0
+if [ -n "$HUGGING_FACE_HUB_TOKEN" ] || [ -f "$HOME/.cache/huggingface/token" ]; then
+    _hf_ok=1
+fi
+if [ "$_hf_ok" -eq 0 ]; then
+    _whoami=$(huggingface-cli whoami 2>/dev/null || true)
+    if echo "$_whoami" | grep -q "togethercomputer"; then
+        _hf_ok=1
+    fi
+fi
+if [ "$_hf_ok" -eq 0 ]; then
+    echo "ERROR: No HuggingFace token found and 'huggingface-cli whoami' does not show togethercomputer org."
+    echo "       Run: huggingface-cli login"
+    echo "       Or set HUGGING_FACE_HUB_TOKEN env var."
+    exit 1
+fi
+unset _hf_ok _whoami
+
 # 3. datasets
 bash "$SCRIPT_DIR/prepare_datasets.sh" "$PYTHON" "$SCRIPT_DIR"
 
@@ -719,6 +755,9 @@ for i in "${!MODEL_CONFIGS[@]}"; do
             wait "${PIDS[$i]}"
             EXIT_CODES[$i]=$?
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] Cooling down 60s for GPU memory to release..."
+            sleep 60
+        else
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] No GPU overlap with next config, sleeping 60s before launching next..."
             sleep 60
         fi
     fi

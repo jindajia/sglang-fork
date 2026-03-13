@@ -33,7 +33,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python3 -m sglang.launch_server \
 # Stage1.2 then we need to send some sample requests to server to dump kv cache
 # for exmaple here I use tore-eval to send sample requests
 lm_eval --model local-completions --tasks mmlu_pro \
-    --limit 500 \
+    --limit 16 \
     --model_args model=Qwen/Qwen3-4B-Thinking-2507,base_url=http://localhost:30001/v1/completions,max_model_len=20000,num_concurrent=32,max_retries=1,tokenized_requests=False
 
 # Stage2 after finish with dump kv cache, we need to use dumped kv cache to calculate kmeans centroids
