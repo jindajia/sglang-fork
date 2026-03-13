@@ -81,7 +81,7 @@ dependencies = [
   "grpcio-reflection>=1.78.0",
   "grpcio-health-checking>=1.78.0",
 
-  "flash-kmeans",
+  "flash-kmeans @ git+https://github.com/jindajia/flash-kmeans.git",
 ]
 
 [[tool.uv.index]]
@@ -99,7 +99,7 @@ torch = [
   { index = "pypi", marker = "platform_machine == 'x86_64'"},
   { index = "torch-cu129", marker = "platform_machine == 'aarch64'"},
 ]
-flash-kmeans = { git = "https://github.com/jindajia/flash-kmeans", branch = "main" }
+
 
 [project.optional-dependencies]
 checkpoint-engine = ["checkpoint-engine==0.1.2"]
