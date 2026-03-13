@@ -988,7 +988,7 @@ class MHATokenToKVPool(KVCache):
                     self.k_cluster_ids = [
                         torch.zeros(
                             self.size + self.page_size,
-                            dtype=torch.uint8,
+                            dtype=torch.int32,
                             device=self.device,
                         )
                         for _ in range(self.layer_num)
@@ -996,7 +996,7 @@ class MHATokenToKVPool(KVCache):
                     self.v_cluster_ids = [
                         torch.zeros(
                             self.size + self.page_size,
-                            dtype=torch.uint8,
+                            dtype=torch.int32,
                             device=self.device,
                         )
                         for _ in range(self.layer_num)
@@ -1284,7 +1284,7 @@ class MHATokenToKVPool(KVCache):
             if self.k_cluster_ids is not None and k_cluster_ids is not None:
                 loc_flat = loc.view(-1)
                 k_cluster_ids_flat = k_cluster_ids.view(-1).to(
-                    dtype=torch.uint8, device=self.device
+                    dtype=torch.int32, device=self.device
                 )
                 self.k_cluster_ids[layer_id - self.start_layer][loc_flat] = (
                     k_cluster_ids_flat
@@ -1292,7 +1292,7 @@ class MHATokenToKVPool(KVCache):
             if self.v_cluster_ids is not None and v_cluster_ids is not None:
                 loc_flat = loc.view(-1)
                 v_cluster_ids_flat = v_cluster_ids.view(-1).to(
-                    dtype=torch.uint8, device=self.device
+                    dtype=torch.int32, device=self.device
                 )
                 self.v_cluster_ids[layer_id - self.start_layer][loc_flat] = (
                     v_cluster_ids_flat
