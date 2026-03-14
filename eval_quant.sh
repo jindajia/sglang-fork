@@ -59,8 +59,8 @@ trap cleanup INT TERM
 # Available preset names:
 #   gpqa_think, humaneval_think, customized_livecodebench_think, aime25_think, math_500_think
 #
-TASKS_ALL="gpqa_think:5,humaneval_think:5,aime25_think:5,math_500_think:5"
-TASKS_ONCE="gpqa_think:1,humaneval_think:1,aime25_think:1,math_500_think:1"
+TASKS_ALL="math_500_think:5,aime25_think:5,gpqa_think:5,humaneval_think:5,customized_livecodebench_think:5"
+TASKS_ONCE="math_500_think:1,aime25_think:1,gpqa_think:1,humaneval_think:1,customized_livecodebench_think:1"
 
 # =============================================================================
 # Model → num_layers lookup table
