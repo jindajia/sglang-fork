@@ -529,6 +529,11 @@ eval_single_model() {
 
         for RUN_IDX in $(seq 1 $REPEAT); do
             RUN_DIR="$RESULTS_DIR/${model_short}/${TASK_NAME}/${rot_suffix}/run${RUN_IDX}"
+            # Skip if this run already has results
+            if [ -f "${RUN_DIR}/results.jsonl" ]; then
+                log_message "  Run ${RUN_IDX}/${REPEAT} already done, skipping"
+                continue
+            fi
             mkdir -p "$RUN_DIR"
             log_message "  Run ${RUN_IDX}/${REPEAT} -> $RUN_DIR"
 
