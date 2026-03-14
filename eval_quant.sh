@@ -78,27 +78,25 @@ MODEL_CONFIGS=(
     # "QUANT |1|0|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|0 |0        |1  |1  |1  |0   |2                |1  |1  |1  |${TASKS_ALL}"
     # "QUANT |1|1|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|0 |0        |1  |1  |1  |0   |3                |1  |1  |1  |${TASKS_ALL}"
     # Round 1 — 4 GPU groups in parallel (hadamard_order=16)
-    # "KMEANS|1|0|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|1      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|0,1      |2  |1  |1  |${TASKS_ONCE}"
-    # "KMEANS|1|0|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|16      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|2,3      |2  |1  |1  |${TASKS_ONCE}"
-    # "KMEANS|1|0|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|256      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|4,5      |2  |1  |1  |${TASKS_ONCE}"
+    # "KMEANS|1|0|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|1      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|0,1      |2  |1  |1  |${TASKS_ALL}"
+    # "KMEANS|1|0|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|16      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|2,3      |2  |1  |1  |${TASKS_ALL}"
+    # "KMEANS|1|0|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|256      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|4,5      |2  |1  |1  |${TASKS_ALL}"
     # "KMEANS|1|0|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|2048      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|6,7      |2  |1  |1  |${TASKS_ONCE}"
     # Round 2 — hadamard_order=64
-    # "KMEANS|1|0|64 |INT4|Qwen/Qwen3-4B-Thinking-2507|1      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|0,1      |2  |1  |1  |${TASKS_ONCE}"
-    # "KMEANS|1|0|64 |INT4|Qwen/Qwen3-4B-Thinking-2507|16      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|2,3      |2  |1  |1  |${TASKS_ONCE}"
-    # "KMEANS|1|0|64 |INT4|Qwen/Qwen3-4B-Thinking-2507|256      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|4,5      |2  |1  |1  |${TASKS_ONCE}"
+    # "KMEANS|1|0|64 |INT4|Qwen/Qwen3-4B-Thinking-2507|1      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|0,1      |2  |1  |1  |${TASKS_ALL}"
+    # "KMEANS|1|0|64 |INT4|Qwen/Qwen3-4B-Thinking-2507|16      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|2,3      |2  |1  |1  |${TASKS_ALL}"
+    # "KMEANS|1|0|64 |INT4|Qwen/Qwen3-4B-Thinking-2507|256      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|4,5      |2  |1  |1  |${TASKS_ALL}"
     # "KMEANS|1|0|64 |INT4|Qwen/Qwen3-4B-Thinking-2507|2048      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|6,7      |2  |1  |1  |${TASKS_ONCE}"
     # Round 3 — hadamard_order=128
-    # "KMEANS|1|0|128 |INT4|Qwen/Qwen3-4B-Thinking-2507|1      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|0,1      |2  |1  |1  |${TASKS_ONCE}"
-    # "KMEANS|1|0|128 |INT4|Qwen/Qwen3-4B-Thinking-2507|16      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|2,3      |2  |1  |1  |${TASKS_ONCE}"
-    # "KMEANS|1|0|128 |INT4|Qwen/Qwen3-4B-Thinking-2507|256      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|4,5      |2  |1  |1  |${TASKS_ONCE}"
+    # "KMEANS|1|0|128 |INT4|Qwen/Qwen3-4B-Thinking-2507|1      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|0,1      |2  |1  |1  |${TASKS_ALL}"
+    # "KMEANS|1|0|128 |INT4|Qwen/Qwen3-4B-Thinking-2507|16      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|2,3      |2  |1  |1  |${TASKS_ALL}"
+    # "KMEANS|1|0|128 |INT4|Qwen/Qwen3-4B-Thinking-2507|256      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|4,5      |2  |1  |1  |${TASKS_ALL}"
     # "KMEANS|1|0|128 |INT4|Qwen/Qwen3-4B-Thinking-2507|2048      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|6,7      |2  |1  |1  |${TASKS_ONCE}"
-    # "KMEANS|1|0|16 |INT4|Qwen/Qwen3-8B|64      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|6,7      |2  |1  |1  |gpqa_think:1"
-    # "KMEANS|1|1|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|64|0,1,2,3  |4  |1  |1  |0   |0,1,2,3,4,5,6,7 |2  |1  |4  |${TASKS_ALL}"
-    # h=0 re-run: missing tasks for kmeans_1/16/256/2048
+    # h=0 
     "KMEANS|0|0|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|1    |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|0,1  |2  |1  |1  |math_500_think:5,aime25_think:5,customized_livecodebench_think:5"
-    "KMEANS|0|0|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|16   |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|2,3  |2  |1  |1  |aime25_think:5,customized_livecodebench_think:5"
-    "KMEANS|0|0|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|256  |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|4,5  |2  |1  |1  |aime25_think:5,customized_livecodebench_think:5"
-    "KMEANS|0|0|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|2048 |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|6,7  |2  |1  |1  |humaneval_think:1,aime25_think:1,math_500_think:1,customized_livecodebench_think:1"
+    "KMEANS|0|0|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|2048 |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|2,3  |2  |1  |1  |math_500_think:4,aime25_think:4"
+    "KMEANS|0|0|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|2048 |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|4,5  |2  |1  |1  |gpqa_think:1,humaneval_think:4"
+    "KMEANS|0|0|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|2048 |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|6,7  |2  |1  |1  |customized_livecodebench_think:4"
 )
 
 # =============================================================================
@@ -568,12 +566,14 @@ eval_single_model() {
 import json, math, os
 task_dir = "${TASK_DIR}"
 n_runs = ${REPEAT}
+missing = [i for i in range(1, 6)
+           if not os.path.exists(os.path.join(task_dir, f"run{i}", "results.jsonl"))]
+if missing:
+    print(f"Skipping aggregation: run(s) {missing} missing results.jsonl — will aggregate when all 5 runs complete")
+    exit(0)
 all_metrics = []
 for run_idx in range(1, n_runs + 1):
     results_file = os.path.join(task_dir, f"run{run_idx}", "results.jsonl")
-    if not os.path.exists(results_file):
-        print(f"Warning: {results_file} not found, skipping run {run_idx}")
-        continue
     with open(results_file) as f:
         for line in f:
             line = line.strip()
