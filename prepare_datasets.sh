@@ -8,6 +8,11 @@ set -eo pipefail
 PYTHON="${1:-python3}"
 SCRIPT_DIR="${2:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 
+# Use shared HuggingFace cache if HF_HOME is not already set
+if [ -z "$HF_HOME" ]; then
+    export HF_HOME="/data/shared/huggingface"
+fi
+
 # Read HF token from the standard cache location if not already set
 if [ -z "$HUGGING_FACE_HUB_TOKEN" ] && [ -f "$HOME/.cache/huggingface/token" ]; then
     export HUGGING_FACE_HUB_TOKEN="$(cat "$HOME/.cache/huggingface/token")"
