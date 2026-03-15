@@ -1156,7 +1156,7 @@ class TritonAttnBackend(AttentionBackend):
                 if hasattr(kv_pool, "get_k_centroids")
                 else None
             )
-            if _hadamard_enabled:
+            if _hadamard_enabled and k_centroids is not None:
                 orig_shape = k_centroids.shape  # (a, b, c, d)
                 k_centroids = k_centroids.view(
                     *orig_shape[:-1],
@@ -1170,7 +1170,7 @@ class TritonAttnBackend(AttentionBackend):
                 if hasattr(kv_pool, "get_v_centroids")
                 else None
             )
-            if _rotate_v_enabled:
+            if _rotate_v_enabled and v_centroids is not None:
                 orig_shape = v_centroids.shape  # (a, b, c, d)
                 v_centroids = v_centroids.view(
                     *orig_shape[:-1],
