@@ -27,6 +27,7 @@ trap cleanup INT TERM
 declare -A MODEL_NUM_LAYERS=(
     ["Qwen/Qwen3-4B-Thinking-2507"]=36
     ["Qwen/Qwen3-8B"]=36
+    ["zai-org/GLM-4.7-FP8"]=92
 )
 
 # =============================================================================
@@ -43,8 +44,14 @@ declare -A MODEL_NUM_LAYERS=(
 #   kmeans_gpu : GPU(s) for Stage 2 K-means (CUDA_VISIBLE_DEVICES)
 #
 MODEL_CONFIGS=(
-    # model                              |clusters|dump_gpus|dtp|dep|ddp|kmeans_gpu
-    "Qwen/Qwen3-4B-Thinking-2507        |256      |0,1  |2  |1  |1  |0,1"
+    # model                              |clusters|dump_gpus        |dtp|dep|ddp|kmeans_gpu
+    # "Qwen/Qwen3-4B-Thinking-2507        |256      |0,1              |2  |1  |1  |0,1"
+    # GLM-4.7-FP8 (TP=8, all 8 GPUs; Stage 1 skipped if dump already at /data/jisenli2/kv-cache/GLM-4.7-FP8/mmlu_pro-*-tokens/)
+    "zai-org/GLM-4.7-FP8               |64        |0,1,2,3,4,5,6,7  |8  |1  |1  |0"
+    # "zai-org/GLM-4.7-FP8               |16       |0,1,2,3,4,5,6,7  |8  |1  |1  |2"
+    # "zai-org/GLM-4.7-FP8               |256      |0,1,2,3,4,5,6,7  |8  |1  |1  |4"
+    # "zai-org/GLM-4.7-FP8               |2048     |0,1,2,3,4,5,6,7  |8  |1  |1  |6"
+
     # "Qwen/Qwen3-4B-Thinking-2507        |16      |2,3  |2  |1  |1  |2,3"
     # "Qwen/Qwen3-4B-Thinking-2507        |256      |4,5  |2  |1  |1  |4,5"
     # "Qwen/Qwen3-4B-Thinking-2507        |2048      |6,7  |2  |1  |1  |6,7"
@@ -56,7 +63,7 @@ MODEL_CONFIGS=(
 # =============================================================================
 TASK="mmlu_pro"
 LIMIT=16          # per subtask; mmlu_pro has 14 subtasks → 16×14≈224 total
-DUMP_TOKENS=10000
+DUMP_TOKENS=20000
 BASE_PORT=30001
 
 KV_BASE="${KV_BASE:-/data/jisenli2/kv-cache}"
@@ -242,7 +249,7 @@ run_dump_config() {
 
     local expected=$((num_layers * 2))
     local actual
-    actual=$(ls "${centroids_dir}"/*.pt 2>/dev/null | wc -l)
+    actual=$(find "${centroids_dir}" -name "*.pt" 2>/dev/null | wc -l)
 
     if [ "$actual" -ge "$expected" ]; then
         log "✓ Stage 2 skipped: $actual/$expected centroid files already exist"
@@ -282,7 +289,7 @@ for layer_id in range(num_layers):
 print("Done.", flush=True)
 PYEOF
 
-        actual=$(ls "${centroids_dir}"/*.pt 2>/dev/null | wc -l)
+        actual=$(find "${centroids_dir}" -name "*.pt" 2>/dev/null | wc -l)
         if [ "$actual" -lt "$expected" ]; then
             log "✗ Stage 2 failed: only $actual/$expected centroid files produced"
             return 1

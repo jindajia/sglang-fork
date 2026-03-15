@@ -36,6 +36,11 @@ lm_eval --model local-completions --tasks mmlu_pro \
     --limit 16 \
     --model_args model=Qwen/Qwen3-4B-Thinking-2507,base_url=http://localhost:30001/v1/completions,max_model_len=20000,num_concurrent=32,max_retries=1,tokenized_requests=False
 
+lm_eval --model local-chat-completions --tasks mmlu_pro \
+      --limit 16 \
+      --apply_chat_template \
+      --model_args "model=zai-org/GLM-4.7-FP8,base_url=http://localhost:30001/v1/chat/completions,max_model_len=202752,num_concurrent=32,max_retries=1,tokenized_requests=False,temperature=1.0"
+
 # Stage2 after finish with dump kv cache, we need to use dumped kv cache to calculate kmeans centroids
 
 # please check flash-kmeans.ipynb

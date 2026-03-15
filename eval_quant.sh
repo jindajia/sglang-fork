@@ -40,7 +40,7 @@ trap cleanup INT TERM
 #   hadamard       : 0 or 1 (ignored for BASE)
 #   rotate_v       : 0 or 1 (ignored for BASE)
 #   hadamard_order : e.g. 16, 64, 128 (ignored for BASE)
-#   kv_dtype       : BF16 or INT4
+#   kv_dtype       : BF16, INT4, or FP8 (FP8 maps to --kv-cache-dtype fp8_e4m3)
 #   model_name     : full HuggingFace model ID
 #   num_layers     : number of transformer layers (used in KMEANS for dump verification)
 #   n_clusters     : K-means cluster count (KMEANS only; set 0 for BASE/QUANT)
@@ -61,6 +61,8 @@ trap cleanup INT TERM
 #
 TASKS_ALL="math_500_think:5,aime25_think:5,gpqa_think:5,humaneval_think:5,customized_livecodebench_think:5"
 TASKS_ONCE="math_500_think:1,aime25_think:1,gpqa_think:1,humaneval_think:1,customized_livecodebench_think:1"
+TASKS_GLM_ALL="GLM_math_500_think:3,GLM_aime25_think:3,GLM_gpqa_think:3,GLM_humaneval_think:3,GLM_customized_livecodebench_think:3"
+TASKS_GLM_ONCE="GLM_math_500_think:1,GLM_aime25_think:1,GLM_gpqa_think:1,GLM_humaneval_think:1,GLM_customized_livecodebench_think:1"
 
 # =============================================================================
 # Model → num_layers lookup table
@@ -69,6 +71,7 @@ TASKS_ONCE="math_500_think:1,aime25_think:1,gpqa_think:1,humaneval_think:1,custo
 declare -A MODEL_NUM_LAYERS=(
     ["Qwen/Qwen3-4B-Thinking-2507"]=36
     ["Qwen/Qwen3-8B"]=36
+    ["zai-org/GLM-4.7-FP8"]=92
 )
 
 MODEL_CONFIGS=(
@@ -92,11 +95,33 @@ MODEL_CONFIGS=(
     # "KMEANS|1|0|128 |INT4|Qwen/Qwen3-4B-Thinking-2507|16      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|2,3      |2  |1  |1  |${TASKS_ALL}"
     # "KMEANS|1|0|128 |INT4|Qwen/Qwen3-4B-Thinking-2507|256      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|4,5      |2  |1  |1  |${TASKS_ALL}"
     # "KMEANS|1|0|128 |INT4|Qwen/Qwen3-4B-Thinking-2507|2048      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|6,7      |2  |1  |1  |${TASKS_ONCE}"
-    # h=0 
-    "KMEANS|0|0|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|1    |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|0,1  |2  |1  |1  |math_500_think:5,aime25_think:5,customized_livecodebench_think:5"
-    "KMEANS|0|0|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|2048 |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|2,3  |2  |1  |1  |math_500_think:4,aime25_think:4"
-    "KMEANS|0|0|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|2048 |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|4,5  |2  |1  |1  |gpqa_think:1,humaneval_think:4"
-    "KMEANS|0|0|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|2048 |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|6,7  |2  |1  |1  |customized_livecodebench_think:4"
+    # kmeans c=2048 gpqa rerun
+    # "KMEANS|0|0|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|2048 |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|2,3  |2  |1  |1  |gpqa_think:5:2-3"
+    # "KMEANS|0|0|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|2048 |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|4,5  |2  |1  |1  |gpqa_think:5:4-4"
+    # "KMEANS|0|0|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|2048 |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|6,7  |2  |1  |1  |gpqa_think:5:5-5"
+    # R3 (ho=128) rerun
+    # "KMEANS|1|0|128 |INT4|Qwen/Qwen3-4B-Thinking-2507|2048 |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|0,1  |2  |1  |1  |math_500_think:5,aime25_think:5"
+    # "KMEANS|1|0|128 |INT4|Qwen/Qwen3-4B-Thinking-2507|2048 |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|2,3  |2  |1  |1  |gpqa_think:5,humaneval_think:5"
+    # "KMEANS|1|0|128 |INT4|Qwen/Qwen3-4B-Thinking-2507|256  |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|4,5  |2  |1  |1  |humaneval_think:5,customized_livecodebench_think:5"
+    # "KMEANS|1|0|128 |INT4|Qwen/Qwen3-4B-Thinking-2507|16   |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|6,7  |2  |1  |1  |customized_livecodebench_think:5"
+    # # R3 (ho=128) rerun — queue
+    # "KMEANS|1|0|128 |INT4|Qwen/Qwen3-4B-Thinking-2507|1    |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|0,1  |2  |1  |1  |customized_livecodebench_think:5"
+    # "KMEANS|1|0|128 |INT4|Qwen/Qwen3-4B-Thinking-2507|2048 |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|6,7  |2  |1  |1  |customized_livecodebench_think:5"
+
+    # ==========================================================================
+    # GLM-4.7-FP8  (TP=8, all 8 GPUs; all configs sequential)
+    # ==========================================================================
+    # mode  |h|rv|ho |dtype|model              |clusters|dump_gpus        |dtp|dep|ddp|kmeans_gpu|eval_gpus        |etp|eep|edp|tasks
+    # Baseline
+    "BASE  |0|0|0  |FP8 |zai-org/GLM-4.7-FP8|0    |0                 |1  |1  |1  |0          |0,1,2,3,4,5,6,7  |8  |1  |1  |${TASKS_GLM_ALL}"
+    # "BASE  |0|0|0  |INT4|zai-org/GLM-4.7-FP8|0    |0                 |1  |1  |1  |0          |0,1,2,3,4,5,6,7  |8  |1  |1  |${TASKS_GLM_ONCE}"
+    # Pure rotation — no K-means (QUANT mode)
+    # "QUANT |1|0|16 |INT4|zai-org/GLM-4.7-FP8|0    |0                 |1  |1  |1  |0          |0,1,2,3,4,5,6,7  |8  |1  |1  |${TASKS_GLM_ALL}"
+    # "QUANT |1|1|16 |INT4|zai-org/GLM-4.7-FP8|0    |0                 |1  |1  |1  |0          |0,1,2,3,4,5,6,7  |8  |1  |1  |${TASKS_GLM_ALL}"
+    # "QUANT |1|0|64 |INT4|zai-org/GLM-4.7-FP8|0    |0                 |1  |1  |1  |0          |0,1,2,3,4,5,6,7  |8  |1  |1  |${TASKS_GLM_ALL}"
+    # "QUANT |1|1|64 |INT4|zai-org/GLM-4.7-FP8|0    |0                 |1  |1  |1  |0          |0,1,2,3,4,5,6,7  |8  |1  |1  |${TASKS_GLM_ALL}"
+    # "QUANT |1|0|128|INT4|zai-org/GLM-4.7-FP8|0    |0                 |1  |1  |1  |0          |0,1,2,3,4,5,6,7  |8  |1  |1  |${TASKS_GLM_ALL}"
+    # "QUANT |1|1|128|INT4|zai-org/GLM-4.7-FP8|0    |0                 |1  |1  |1  |0          |0,1,2,3,4,5,6,7  |8  |1  |1  |${TASKS_GLM_ALL}"
 )
 
 # =============================================================================
@@ -400,12 +425,16 @@ eval_single_model() {
     fi
 
     # Validate kv_dtype
-    if [[ "$kv_dtype" != "BF16" && "$kv_dtype" != "INT4" ]]; then
-        echo "ERROR: kv_dtype must be BF16 or INT4, got: '$kv_dtype'"
+    if [[ "$kv_dtype" != "BF16" && "$kv_dtype" != "INT4" && "$kv_dtype" != "FP8" ]]; then
+        echo "ERROR: kv_dtype must be BF16, INT4, or FP8, got: '$kv_dtype'"
         return 1
     fi
     local kv_cache_dtype
-    [[ "$kv_dtype" == "BF16" ]] && kv_cache_dtype="auto" || kv_cache_dtype="int4"
+    case "$kv_dtype" in
+        BF16) kv_cache_dtype="auto"       ;;
+        INT4) kv_cache_dtype="int4"       ;;
+        FP8)  kv_cache_dtype="fp8_e4m3"  ;;
+    esac
 
     local kv_dtype_lower="${kv_dtype,,}"
     local rot_suffix
@@ -445,7 +474,7 @@ eval_single_model() {
         local _cdir="${KV_DUMP_BASE}/$(extract_model_short_name "$model_name")/${DUMP_LM_EVAL_TASKS}-${DUMP_TOKENS}-tokens/c_${n_clusters}"
         local _expected=$((num_layers * 2))
         local _actual
-        _actual=$(ls "${_cdir}"/*.pt 2>/dev/null | wc -l)
+        _actual=$(find "${_cdir}" -name "*.pt" 2>/dev/null | wc -l)
 
         if [ "$_actual" -ge "$_expected" ]; then
             log_message "✓ Centroids already complete ($_actual/${_expected} files): $_cdir"
@@ -515,19 +544,22 @@ eval_single_model() {
     local overall_exit=0
     IFS=',' read -ra TASK_LIST <<< "$tasks"
     for TASK_WITH_REPEAT in "${TASK_LIST[@]}"; do
-        if [[ "$TASK_WITH_REPEAT" == *":"* ]]; then
-            TASK_NAME="${TASK_WITH_REPEAT%%:*}"
-            REPEAT="${TASK_WITH_REPEAT##*:}"
+        # Format: task:N  or  task:N:start-end
+        IFS=':' read -r TASK_NAME REPEAT RUN_RANGE <<< "$TASK_WITH_REPEAT"
+        REPEAT="${REPEAT:-1}"
+        if [[ -n "$RUN_RANGE" ]]; then
+            RUN_START="${RUN_RANGE%-*}"
+            RUN_END="${RUN_RANGE#*-}"
         else
-            TASK_NAME="$TASK_WITH_REPEAT"
-            REPEAT=1
+            RUN_START=1
+            RUN_END=$REPEAT
         fi
 
         log_message "=========================================="
-        log_message "Task: $TASK_NAME (repeat x${REPEAT})"
+        log_message "Task: $TASK_NAME (repeat x${REPEAT}, runs ${RUN_START}-${RUN_END})"
         log_message "=========================================="
 
-        for RUN_IDX in $(seq 1 $REPEAT); do
+        for RUN_IDX in $(seq $RUN_START $RUN_END); do
             RUN_DIR="$RESULTS_DIR/${model_short}/${TASK_NAME}/${rot_suffix}/run${RUN_IDX}"
             # Skip if this run already has results
             if [ -f "${RUN_DIR}/results.jsonl" ]; then
