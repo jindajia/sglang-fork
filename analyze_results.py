@@ -24,6 +24,7 @@ _CLUSTERS        = [1, 16, 256, 2048]
 
 _BASE_CONFIGS = [
     ("baseline_bf16",      "BF16"),
+    ("baseline_fp8",       "FP8"),
     ("baseline_int4",      "INT4"),
     ("quant_int4_1_0_16",  "INT4 + R16 (k)"),
     ("quant_int4_1_1_16",  "INT4 + R16 (k&v)"),
@@ -66,6 +67,15 @@ TASK_DISPLAY_NAMES = {
 }
 
 # =============================================================================
+# Per-model expected run count
+# =============================================================================
+
+def get_expected_runs(model_name: str) -> int:
+    if "GLM" in model_name:
+        return 3
+    return 5
+
+# =============================================================================
 # Helpers
 # =============================================================================
 
@@ -73,13 +83,14 @@ def pct(x):
     return round(x * 100, 2)
 
 def avg_of_rounded(values):
-    if not values:
+    valid = [v for v in values if v is not None]
+    if not valid:
         return None
-    return round(sum(values) / len(values), 2)
+    return round(sum(valid) / len(valid), 2)
 
 def fmt(x):
     if x is None:
-        return "—"
+        return "--"
     return f"{x:.2f}"
 
 # =============================================================================
@@ -118,7 +129,7 @@ def parse_config_dir(config_dir):
     return None
 
 
-# Structure: data[model][task][config_key] = {"values": [...pct...], "avg": pct}
+# Structure: data[model][task][config_key] = {"run_values": {run_idx: pct}, "from_agg": bool}
 data = defaultdict(lambda: defaultdict(dict))
 
 # --- Pass 1: aggregated.json ---
@@ -135,10 +146,10 @@ for agg_file in sorted(RESULTS_DIR.rglob("aggregated.json")):
         continue
 
     raw_values = agg[metric]["values"]
-    pct_values = [pct(v) for v in raw_values]
+    run_values = {i + 1: pct(v) for i, v in enumerate(raw_values)}
     data[model_name][task_key][config_key] = {
-        "values": pct_values,
-        "avg":    avg_of_rounded(pct_values),
+        "run_values": run_values,
+        "from_agg":   True,
     }
 
 # --- Pass 2: fallback to runN/results.jsonl ---
@@ -150,7 +161,18 @@ for results_file in sorted(RESULTS_DIR.rglob("results.jsonl")):
         continue
     model_name, task_key, config_key = parsed
 
-    if config_key in data[model_name][task_key]:
+    # Skip if already fully loaded from aggregated.json
+    existing = data[model_name][task_key].get(config_key, {})
+    if existing.get("from_agg"):
+        continue
+
+    # Parse run index from directory name (run1, run2, ...)
+    run_name = run_dir.name
+    if not run_name.startswith("run"):
+        continue
+    try:
+        run_idx = int(run_name[3:])
+    except ValueError:
         continue
 
     metric = TASK_PRIMARY_METRIC[task_key]
@@ -163,15 +185,10 @@ for results_file in sorted(RESULTS_DIR.rglob("results.jsonl")):
     except Exception:
         continue
 
-    bucket = data[model_name][task_key].setdefault(config_key, {"values": [], "avg": None})
-    bucket["values"].append(pct(raw_value))
-
-# Finalize avg for fallback entries
-for model_name in data:
-    for task_key in data[model_name]:
-        for config_key, entry in data[model_name][task_key].items():
-            if entry["avg"] is None and entry["values"]:
-                entry["avg"] = avg_of_rounded(entry["values"])
+    bucket = data[model_name][task_key].setdefault(
+        config_key, {"run_values": {}, "from_agg": False}
+    )
+    bucket["run_values"][run_idx] = pct(raw_value)
 
 # =============================================================================
 # Markdown generation
@@ -182,6 +199,8 @@ lines = ["# KV Rotation Evaluation Results", ""]
 for model_name in sorted(data):
     lines.append(f"## {model_name}")
     lines.append("")
+
+    expected_runs = get_expected_runs(model_name)
 
     for task_key, task_label in TASK_DISPLAY_NAMES.items():
         task_data = data[model_name].get(task_key)
@@ -196,26 +215,23 @@ for model_name in sorted(data):
         if not all_configs:
             continue
 
-        max_runs = max(len(task_data[c]["values"]) for c in all_configs)
-
         lines.append(f"### {task_label}")
         lines.append("")
 
-        run_headers = " | ".join(f"Run {i+1}" for i in range(max_runs))
+        run_headers = " | ".join(f"Run {i+1}" for i in range(expected_runs))
         lines.append(f"| Config | {run_headers} | Avg |")
-        lines.append(f"|:--- | {' | '.join(['---:'] * max_runs)} | ---:|")
+        lines.append(f"|:--- | {' | '.join(['---:'] * expected_runs)} | ---:|")
 
         for config_key in all_configs:
-            label = CONFIG_KEY_TO_LABEL.get(config_key, config_key)
-            entry = task_data[config_key]
-            values = entry["values"]
-            avg    = entry["avg"]
+            label      = CONFIG_KEY_TO_LABEL.get(config_key, config_key)
+            run_values = task_data[config_key]["run_values"]
+
+            # Build value list for runs 1..expected_runs; None = missing
+            values = [run_values.get(i) for i in range(1, expected_runs + 1)]
+            avg    = avg_of_rounded(values)
 
             cells = [fmt(v) for v in values]
-            while len(cells) < max_runs:
-                cells.append("—")
-
-            row = " | ".join(cells)
+            row   = " | ".join(cells)
             lines.append(f"| {label} | {row} | {fmt(avg)} |")
 
         lines.append("")
