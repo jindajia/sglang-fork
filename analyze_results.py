@@ -87,15 +87,15 @@ def fmt(x):
 # =============================================================================
 
 def parse_config_dir(config_dir):
-    """Return (model_name, task_key, config_key) for new layout, or None."""
-    # New layout: eval_results/{model}/{task}/{config}/
+    """Return (model_name, task_key, config_key) for known layouts, or None."""
+    # Layout A: eval_results/{model}/{task}/{config}/
     task_key   = config_dir.parent.name
     config_key = config_dir.name
     model_name = config_dir.parent.parent.name
     if task_key in TASK_PRIMARY_METRIC:
         return model_name, task_key, config_key
 
-    # Old layout: eval_results/{model}/{model}_{task}_{config}/
+    # Layout B (old): eval_results/{model}/{model}_{task}_{config}/
     model_name = config_dir.parent.name
     dir_name   = config_dir.name
     prefix = model_name + "_"
@@ -105,6 +105,15 @@ def parse_config_dir(config_dir):
             if rest.startswith(t + "_"):
                 config_key = rest[len(t) + 1:]
                 return model_name, t, config_key
+
+    # Layout C: eval_results/{model}/{prefix}_{task}/{config}/
+    # e.g. eval_results/GLM-4.7-FP8/GLM_aime25_think/quant_int4_1_0_64/
+    model_name = config_dir.parent.parent.name
+    task_dir   = config_dir.parent.name
+    config_key = config_dir.name
+    for t in TASK_PRIMARY_METRIC:
+        if task_dir == t or task_dir.endswith("_" + t):
+            return model_name, t, config_key
 
     return None
 
