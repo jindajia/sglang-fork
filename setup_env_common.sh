@@ -11,7 +11,7 @@
 set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONDA_BASE="/data/jisenli2/miniconda"
+CONDA_BASE="/data/$USER/miniconda"
 CONDA_ENV_NAME="sglang_env"
 CONDA_ENV_DIR="$CONDA_BASE/envs/$CONDA_ENV_NAME"
 TORE_EVAL_DIR="$SCRIPT_DIR/tore-eval"
@@ -22,6 +22,10 @@ if [ ! -f "$CONDA" ]; then
     echo "ERROR: conda not found at $CONDA_BASE. Please install miniconda first."
     exit 1
 fi
+
+echo "=== Accepting Anaconda Terms of Service ==="
+"$CONDA" tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
+"$CONDA" tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
 
 if [ -d "$CONDA_ENV_DIR" ]; then
     echo "Conda environment '$CONDA_ENV_NAME' already exists at $CONDA_ENV_DIR."

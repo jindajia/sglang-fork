@@ -30,6 +30,25 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python3 -m sglang.launch_server \
     --host 0.0.0.0 \
     --port 30001 \
     --disable-cuda-graph
+
+export DUMP_KVCACHE_DIR="/data/jisenli2/kv-cache/GLM-4.7-FP8/mmlu_pro-20000-tokens/"
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python3 -m sglang.launch_server \
+    --model-path zai-org/GLM-4.7-FP8 \
+    --max-running-requests 32 \
+    --max-queued-requests 32 \
+    --page-size 128 \
+    --chunked-prefill-size 4096 \
+    --mem-fraction-static 0.8 \
+    --pp-max-micro-batch-size 32 \
+    --kv-cache-dtype auto \
+    --prefill-attention-backend fa3 \
+    --decode-attention-backend triton \
+    --sampling-backend flashinfer \
+    --tensor-parallel-size 8 \
+    --data-parallel-size 1 \
+    --host 0.0.0.0 \
+    --port 30001 \
+    --disable-cuda-graph
 # Stage1.2 then we need to send some sample requests to server to dump kv cache
 # for exmaple here I use tore-eval to send sample requests
 lm_eval --model local-completions --tasks mmlu_pro \
@@ -37,7 +56,7 @@ lm_eval --model local-completions --tasks mmlu_pro \
     --model_args model=Qwen/Qwen3-4B-Thinking-2507,base_url=http://localhost:30001/v1/completions,max_model_len=20000,num_concurrent=32,max_retries=1,tokenized_requests=False
 
 lm_eval --model local-chat-completions --tasks mmlu_pro \
-      --limit 16 \
+      --limit 5 \
       --apply_chat_template \
       --model_args "model=zai-org/GLM-4.7-FP8,base_url=http://localhost:30001/v1/chat/completions,max_model_len=202752,num_concurrent=32,max_retries=1,tokenized_requests=False,temperature=1.0"
 
