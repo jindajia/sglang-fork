@@ -958,7 +958,7 @@ class FlashAttentionBackend(AttentionBackend):
                     if hasattr(kv_pool_prefill, "get_k_centroids")
                     else None
                 )
-                if _hadamard_enabled:
+                if _hadamard_enabled and k_centroids_ly is not None:
                     orig_shape = k_centroids_ly.shape  # (a, b, c, d)
                     k_centroids_ly = k_centroids_ly.view(
                         *orig_shape[:-1],
@@ -972,7 +972,7 @@ class FlashAttentionBackend(AttentionBackend):
                     if hasattr(kv_pool_prefill, "get_v_centroids")
                     else None
                 )
-                if _rotate_v_enabled:
+                if _rotate_v_enabled and v_centroids_ly is not None:
                     orig_shape = v_centroids_ly.shape  # (a, b, c, d)
                     v_centroids_ly = v_centroids_ly.view(
                         *orig_shape[:-1],
