@@ -119,7 +119,7 @@ MODEL_CONFIGS=(
     # "QUANT |1|0|16 |INT4|zai-org/GLM-4.7-FP8|0    |0                 |1  |1  |1  |0          |0,1,2,3,4,5,6,7  |8  |1  |1  |${TASKS_GLM_ALL}"
     # "QUANT |1|1|16 |INT4|zai-org/GLM-4.7-FP8|0    |0                 |1  |1  |1  |0          |0,1,2,3,4,5,6,7  |8  |1  |1  |${TASKS_GLM_ALL}"
     # "QUANT |1|0|64 |INT4|zai-org/GLM-4.7-FP8|0    |0                 |1  |1  |1  |0          |0,1,2,3,4,5,6,7  |8  |1  |1  |${TASKS_GLM_ALL}"
-    # "QUANT |1|1|64 |INT4|zai-org/GLM-4.7-FP8|0    |0                 |1  |1  |1  |0          |0,1,2,3,4,5,6,7  |8  |1  |1  |${TASKS_GLM_ALL}"
+    "QUANT |1|1|64 |INT4|zai-org/GLM-4.7-FP8|0    |0                 |1  |1  |1  |0          |0,1,2,3,4,5,6,7  |8  |1  |1  |${TASKS_GLM_ALL}"
     # "QUANT |1|0|128|INT4|zai-org/GLM-4.7-FP8|0    |0                 |1  |1  |1  |0          |0,1,2,3,4,5,6,7  |8  |1  |1  |${TASKS_GLM_ALL}"
     # "QUANT |1|1|128|INT4|zai-org/GLM-4.7-FP8|0    |0                 |1  |1  |1  |0          |0,1,2,3,4,5,6,7  |8  |1  |1  |${TASKS_GLM_ALL}"
 )
@@ -136,7 +136,7 @@ DUMP_LM_EVAL_LIMIT=16   # per subtask; mmlu_pro has 14 subtasks → 16×14≈224
 DUMP_TOKENS=20000
 
 # Base directory for KV dump files and centroids
-KV_DUMP_BASE="${KV_DUMP_BASE:-/data/jisenli2/kv-cache}"
+KV_DUMP_BASE="${KV_DUMP_BASE:-/data/$USER/kv-cache}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TORE_EVAL_DIR="$SCRIPT_DIR/tore-eval"
@@ -150,11 +150,13 @@ if [ -z "$HUGGING_FACE_HUB_TOKEN" ] && [ -f "$HOME/.cache/huggingface/token" ]; 
 fi
 export HF_TOKEN="$HUGGING_FACE_HUB_TOKEN"
 
-CONDA_BASE="/data/jisenli2/miniconda"
+CONDA_BASE="/data/$USER/miniconda"
 CONDA_ENV_NAME="sglang_env"
 CONDA_ENV_DIR="$CONDA_BASE/envs/$CONDA_ENV_NAME"
 PYTHON="$CONDA_ENV_DIR/bin/python3"
 LM_EVAL="$CONDA_ENV_DIR/bin/lm_eval"
+
+export TRITON_CACHE_DIR="/data/$USER/.triton/cache"
 
 GPU_FREE_MEM_MB="${GPU_FREE_MEM_MB:-500}"
 GPU_POLL_INTERVAL="${GPU_POLL_INTERVAL:-240}"

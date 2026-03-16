@@ -53,9 +53,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TORE_EVAL_DIR="$SCRIPT_DIR/tore-eval"
 RESULTS_DIR="$SCRIPT_DIR/eval_results"
 LOGS_DIR="$SCRIPT_DIR/eval_logs"
-CONDA_BASE="/data/jisenli2/miniconda"
+CONDA_BASE="/data/$USER/miniconda"
 CONDA_ENV_NAME="sglang_eval"
 CONDA_ENV_DIR="$CONDA_BASE/envs/$CONDA_ENV_NAME"
+
+export TRITON_CACHE_DIR="/data/$USER/.triton/cache"
 
 mkdir -p "$RESULTS_DIR" "$LOGS_DIR/inference_logs" "$LOGS_DIR/batch_logs"
 

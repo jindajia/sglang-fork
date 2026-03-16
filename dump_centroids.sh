@@ -46,7 +46,7 @@ declare -A MODEL_NUM_LAYERS=(
 MODEL_CONFIGS=(
     # model                              |clusters|dump_gpus        |dtp|dep|ddp|kmeans_gpu
     # "Qwen/Qwen3-4B-Thinking-2507        |256      |0,1              |2  |1  |1  |0,1"
-    # GLM-4.7-FP8 (TP=8, all 8 GPUs; Stage 1 skipped if dump already at /data/jisenli2/kv-cache/GLM-4.7-FP8/mmlu_pro-*-tokens/)
+    # GLM-4.7-FP8 (TP=8, all 8 GPUs; Stage 1 skipped if dump already at /data/$USER/kv-cache/GLM-4.7-FP8/mmlu_pro-*-tokens/)
     "zai-org/GLM-4.7-FP8               |1        |0,1,2,3,4,5,6,7  |8  |1  |1  |0"
     "zai-org/GLM-4.7-FP8               |64        |0,1,2,3,4,5,6,7  |8  |1  |1  |1"
     "zai-org/GLM-4.7-FP8               |16       |0,1,2,3,4,5,6,7  |8  |1  |1  |2"
@@ -67,14 +67,14 @@ LIMIT=16          # per subtask; mmlu_pro has 14 subtasks → 16×14≈224 total
 DUMP_TOKENS=20000
 BASE_PORT=30001
 
-KV_BASE="${KV_BASE:-/data/jisenli2/kv-cache}"
+KV_BASE="${KV_BASE:-/data/$USER/kv-cache}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOGS_DIR="$SCRIPT_DIR/eval_logs"
 
 export HF_HOME=/data/shared/huggingface
 
-CONDA_BASE="/data/jisenli2/miniconda"
+CONDA_BASE="/data/$USER/miniconda"
 CONDA_ENV_NAME="sglang_env"
 CONDA_ENV_DIR="$CONDA_BASE/envs/$CONDA_ENV_NAME"
 PYTHON="$CONDA_ENV_DIR/bin/python3"
