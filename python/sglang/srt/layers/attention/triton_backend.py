@@ -121,6 +121,8 @@ class TritonAttnBackend(AttentionBackend):
             get_attention_tp_size()
         )
         self._dump_kv_done_layers = set()
+        self._dump_saved_tokens = {}
+        self._dump_chunk_idx = {}
         if (
             model_runner.hybrid_gdn_config is not None
             or model_runner.kimi_linear_config is not None
@@ -851,6 +853,68 @@ class TritonAttnBackend(AttentionBackend):
                 layer, forward_batch.out_cache_loc, k, v
             )
 
+        # Dump aligned q, k, v for calibration (chunked prefill aware)
+        layer_id = layer.layer_id
+        if (
+            layer_id not in self._dump_kv_done_layers
+            and get_bool_env_var("DUMP_KVCACHE", "false")
+        ):
+            dump_tokens = get_int_env_var("DUMP_KVCACHE_TOKENS", 100)
+            saved_so_far = self._dump_saved_tokens.get(layer_id, 0)
+            chunk_idx = self._dump_chunk_idx.get(layer_id, 0)
+            remaining = dump_tokens - saved_so_far
+
+            if remaining > 0:
+                num_tokens = q.shape[0]
+                tokens_to_save = min(num_tokens, remaining)
+
+                if str(
+                    getattr(forward_batch.token_to_kv_pool, "device", "cuda")
+                ).startswith("cuda"):
+                    torch.cuda.synchronize()
+
+                q_dump = (
+                    q[:tokens_to_save]
+                    .view(-1, layer.tp_q_head_num, layer.qk_head_dim)
+                    .contiguous()
+                    .detach()
+                )
+                k_dump = k[:tokens_to_save].contiguous().detach()
+                v_dump = v[:tokens_to_save].contiguous().detach()
+
+                tp_size = get_attention_tp_size()
+                tp_rank = get_attention_tp_rank()
+                if tp_size > 1:
+                    attn_tp_group = get_attention_tp_group()
+                    q_dump = attn_tp_group.all_gather(q_dump, dim=1)
+                    k_dump = attn_tp_group.all_gather(k_dump, dim=1)
+                    v_dump = attn_tp_group.all_gather(v_dump, dim=1)
+
+                if tp_rank == 0:
+                    save_dir = os.environ.get("DUMP_KVCACHE_DIR", ".")
+                    for name, tensor in [
+                        ("q", q_dump),
+                        ("k", k_dump),
+                        ("v", v_dump),
+                    ]:
+                        chunk_dir = os.path.join(
+                            save_dir, f"layer_{layer_id}", name
+                        )
+                        os.makedirs(chunk_dir, exist_ok=True)
+                        path = os.path.join(chunk_dir, f"{chunk_idx}.pt")
+                        torch.save(tensor.cpu(), path)
+                    print(
+                        f"Dumped QKV chunk {chunk_idx} for layer {layer_id} "
+                        f"({tokens_to_save} tokens, "
+                        f"total {saved_so_far + tokens_to_save}/{dump_tokens})"
+                    )
+
+                self._dump_saved_tokens[layer_id] = saved_so_far + tokens_to_save
+                self._dump_chunk_idx[layer_id] = chunk_idx + 1
+
+                if saved_so_far + tokens_to_save >= dump_tokens:
+                    self._dump_kv_done_layers.add(layer_id)
+
         logits_soft_cap = logit_capping_mod(layer.logit_capping_method, layer.logit_cap)
 
         causal = True
@@ -1111,42 +1175,8 @@ class TritonAttnBackend(AttentionBackend):
             kv_indptr = self.forward_metadata.kv_indptr
             kv_indices = self.forward_metadata.kv_indices
 
-        # Optional: dump KV cache for calibration (env DUMP_KVCACHE, DUMP_KVCACHE_TOKENS, DUMP_KVCACHE_DIR)
-        # Each layer dumps once when kv size >= threshold; after save we skip this layer.
         kv_pool = forward_batch.token_to_kv_pool
         layer_id = layer.layer_id
-        if (
-            layer_id not in self._dump_kv_done_layers
-            and get_bool_env_var("DUMP_KVCACHE", "false")
-            and kv_indices.numel() >= get_int_env_var("DUMP_KVCACHE_TOKENS", 100)
-        ):
-            self._dump_kv_done_layers.add(layer_id)
-            if str(getattr(kv_pool, "device", "cuda")).startswith("cuda"):
-                torch.cuda.synchronize()
-            dump_tokens = get_int_env_var("DUMP_KVCACHE_TOKENS", 100)
-            indices = kv_indices.flatten()
-            if indices.numel() > dump_tokens:
-                indices = indices[:dump_tokens]
-            indices = indices.to(kv_pool.get_key_buffer(layer_id).device)
-            save_dir = os.environ.get("DUMP_KVCACHE_DIR", ".")
-            os.makedirs(save_dir, exist_ok=True)
-            tp_size = get_attention_tp_size()
-            tp_rank = get_attention_tp_rank()
-            k = kv_pool.get_key_buffer(layer_id)[indices]
-            v = kv_pool.get_value_buffer(layer_id)[indices]
-            if tp_size > 1:
-                attn_tp_group = get_attention_tp_group()
-                k = attn_tp_group.all_gather(k, dim=1)
-                v = attn_tp_group.all_gather(v, dim=1)
-            if tp_rank == 0:
-                path = os.path.join(
-                    save_dir, f"kv_calibration_layer_{layer_id}.pt"
-                )
-                torch.save(
-                    {"k": k.cpu(), "v": v.cpu(), "indices": indices.cpu()},
-                    path,
-                )
-                print(f"Dumped KV cache for layer {layer_id} to {path}")
 
         # Check if KV cache is quantized (INT4/INT8) for optimized attention
         if hasattr(kv_pool, "dtype") and kv_pool.dtype in ("int4", "int8"):

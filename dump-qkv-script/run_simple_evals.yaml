@@ -1,0 +1,31 @@
+# name: aa_evaluation
+framework: simple-evals
+
+# global arguments
+model_name_or_path: Qwen/Qwen3-4B-Thinking-2507
+# model_name_or_path: DeepSeek
+
+# provider endpoint arguments
+# dtype: int4
+provider: custom
+base_url: http://0.0.0.0:30001/v1
+num_workers: 128
+
+# Task-specific settings
+system_message: ""
+temperature: 0.6
+top_p: 0.95
+max_new_tokens: 20000
+n_repeats: 1
+# num_examples: 10
+
+tasks:
+  - gpqa
+
+loggers:
+  # wandb:
+  #   project: deepseek-quant
+  #   group: simple-evals
+  #   name: auto
+  local:
+    output_dir: auto
