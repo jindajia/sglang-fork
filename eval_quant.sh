@@ -447,7 +447,11 @@ eval_single_model() {
     local kv_dtype_lower="${kv_dtype,,}"
     local rot_suffix
     if [[ "$mode" == "BASE" ]]; then
-        rot_suffix="baseline_${kv_dtype_lower}"
+        if [[ "$kv_dtype" == "FP8" ]]; then
+            rot_suffix="baseline_fp8_kv_bf16"
+        else
+            rot_suffix="baseline_${kv_dtype_lower}"
+        fi
     elif [[ "$mode" == "QUANT" ]]; then
         rot_suffix="quant_${kv_dtype_lower}_${hadamard}_${rotate_v}_${hadamard_order}"
     else
@@ -759,7 +763,11 @@ for i in "${!MODEL_CONFIGS[@]}"; do
     model_short="$(extract_model_short_name "$model_name")"
     kv_dtype_lower="${kv_dtype,,}"
     if [[ "$mode" == "BASE" ]]; then
-        rot_suffix="baseline_${kv_dtype_lower}"
+        if [[ "$kv_dtype" == "FP8" ]]; then
+            rot_suffix="baseline_fp8_kv_bf16"
+        else
+            rot_suffix="baseline_${kv_dtype_lower}"
+        fi
     elif [[ "$mode" == "QUANT" ]]; then
         rot_suffix="quant_${kv_dtype_lower}_${hadamard}_${rotate_v}_${hadamard_order}"
     else
