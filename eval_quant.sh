@@ -114,7 +114,7 @@ MODEL_CONFIGS=(
     # mode  |h|rv|ho |dtype|model              |clusters|dump_gpus        |dtp|dep|ddp|kmeans_gpu|eval_gpus        |etp|eep|edp|tasks
     # Baseline
     # "BASE  |0|0|0  |FP8 |zai-org/GLM-4.7-FP8|0    |0                 |1  |1  |1  |0          |0,1,2,3,4,5,6,7  |8  |1  |1  |${TASKS_GLM_ALL}"
-    "BASE  |0|0|0  |INT4|zai-org/GLM-4.7-FP8|0    |0                 |1  |1  |1  |0          |0,1,2,3,4,5,6,7  |8  |1  |1  |${TASKS_GLM_ALL}"
+    # "BASE  |0|0|0  |INT4|zai-org/GLM-4.7-FP8|0    |0                 |1  |1  |1  |0          |0,1,2,3,4,5,6,7  |8  |1  |1  |${TASKS_GLM_ALL}"
     # Pure rotation — no K-means (QUANT mode)
     # "QUANT |1|0|16 |INT4|zai-org/GLM-4.7-FP8|0    |0                 |1  |1  |1  |0          |0,1,2,3,4,5,6,7  |8  |1  |1  |${TASKS_GLM_ALL}"
     # "QUANT |1|1|16 |INT4|zai-org/GLM-4.7-FP8|0    |0                 |1  |1  |1  |0          |0,1,2,3,4,5,6,7  |8  |1  |1  |${TASKS_GLM_ALL}"
@@ -437,6 +437,12 @@ eval_single_model() {
         INT4) kv_cache_dtype="int4"       ;;
         FP8)  kv_cache_dtype="fp8_e4m3"  ;;
     esac
+    # BASE mode does not apply KV cache quantization.
+    # FP8 here refers to model weight quantization (e.g. GLM-4.7-FP8), not KV cache dtype.
+    # So BASE+FP8 should use auto (BF16) KV cache, same as BASE+BF16.
+    if [[ "$mode" == "BASE" && "$kv_dtype" == "FP8" ]]; then
+        kv_cache_dtype="auto"
+    fi
 
     local kv_dtype_lower="${kv_dtype,,}"
     local rot_suffix

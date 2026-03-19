@@ -277,3 +277,4 @@ eval_results/
 eval_logs/
 .venv/
 datasets/
+server_logs/
