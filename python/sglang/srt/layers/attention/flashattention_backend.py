@@ -24,8 +24,7 @@ if TYPE_CHECKING:
 import math
 import os
 
-from fast_hadamard_transform import hadamard_transform
-from sgl_kernel import merge_state_v2
+from sgl_kernel import hadamard_transform, merge_state_v2
 from sgl_kernel.flash_attn import flash_attn_varlen_func as flash_attn_varlen_func_fa3
 from sgl_kernel.flash_attn import flash_attn_with_kvcache as flash_attn_with_kvcache_fa3
 

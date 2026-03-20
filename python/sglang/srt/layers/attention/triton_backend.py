@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, List, Optional
 import torch
 import triton
 import triton.language as tl
-from fast_hadamard_transform import hadamard_transform
+from sgl_kernel import hadamard_transform
 
 from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
 from sglang.srt.layers.attention.utils import create_flashinfer_kv_indices_triton

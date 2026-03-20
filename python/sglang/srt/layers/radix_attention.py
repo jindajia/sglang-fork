@@ -22,6 +22,7 @@ from torch import nn
 
 from sglang.srt.compilation.compilation_config import register_split_op
 from sglang.srt.compilation.piecewise_context_manager import get_forward_context
+from sglang.srt.layers.attention.q_rotation import maybe_apply_qk_rotation
 from sglang.srt.utils.custom_op import register_custom_op
 
 if TYPE_CHECKING:
@@ -108,6 +109,14 @@ class RadixAttention(nn.Module):
             if "k_rope" not in kwargs:
                 k = k.view(-1, self.tp_k_head_num, self.qk_head_dim)
                 v = v.view(-1, self.tp_v_head_num, self.v_head_dim)
+                q, k = maybe_apply_qk_rotation(
+                    q,
+                    k,
+                    layer_id=self.layer_id,
+                    num_q_heads=self.tp_q_head_num,
+                    num_kv_heads=self.tp_k_head_num,
+                    head_dim=self.qk_head_dim,
+                )
             else:
                 k = k.view(-1, self.tp_k_head_num, self.v_head_dim)
 
