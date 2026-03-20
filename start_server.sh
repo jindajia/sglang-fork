@@ -163,17 +163,17 @@ start_single_server() {
         echo "ERROR: kv_dtype must be BF16, INT4, or FP8, got: '$kv_dtype'"
         return 1
     fi
+    # BASE mode always uses auto (BF16) KV cache regardless of kv_dtype.
+    # kv_dtype for BASE only describes the model weight format (e.g. GLM-4.7-FP8).
+    # For QUANT/KMEANS: BF16/FP8 → auto, INT4 → int4.
     local kv_cache_dtype
-    case "$kv_dtype" in
-        BF16) kv_cache_dtype="auto"       ;;
-        INT4) kv_cache_dtype="int4"       ;;
-        FP8)  kv_cache_dtype="fp8_e4m3"  ;;
-    esac
-    # BASE mode does not apply KV cache quantization.
-    # FP8 here refers to model weight quantization (e.g. GLM-4.7-FP8), not KV cache dtype.
-    # So BASE+FP8 should use auto (BF16) KV cache, same as BASE+BF16.
-    if [[ "$mode" == "BASE" && "$kv_dtype" == "FP8" ]]; then
+    if [[ "$mode" == "BASE" ]]; then
         kv_cache_dtype="auto"
+    else
+        case "$kv_dtype" in
+            BF16|FP8) kv_cache_dtype="auto" ;;
+            INT4)     kv_cache_dtype="int4" ;;
+        esac
     fi
 
     local kv_dtype_lower="${kv_dtype,,}"
