@@ -113,13 +113,13 @@ MODEL_CONFIGS=(
     # ==========================================================================
     # mode  |h|rv|ho |dtype|model              |clusters|dump_gpus        |dtp|dep|ddp|kmeans_gpu|eval_gpus        |etp|eep|edp|tasks
     # Baseline
-    # "BASE  |0|0|0  |FP8 |zai-org/GLM-4.7-FP8|0    |0                 |1  |1  |1  |0          |0,1,2,3,4,5,6,7  |8  |1  |1  |${TASKS_GLM_ALL}"
+    "BASE  |0|0|0  |FP8 |zai-org/GLM-4.7-FP8|0    |0                 |1  |1  |1  |0          |0,1,2,3,4,5,6,7  |8  |1  |1  |${TASKS_GLM_ALL}"
     # "BASE  |0|0|0  |INT4|zai-org/GLM-4.7-FP8|0    |0                 |1  |1  |1  |0          |0,1,2,3,4,5,6,7  |8  |1  |1  |${TASKS_GLM_ALL}"
     # Pure rotation — no K-means (QUANT mode)
     # "QUANT |1|0|16 |INT4|zai-org/GLM-4.7-FP8|0    |0                 |1  |1  |1  |0          |0,1,2,3,4,5,6,7  |8  |1  |1  |${TASKS_GLM_ALL}"
     # "QUANT |1|1|16 |INT4|zai-org/GLM-4.7-FP8|0    |0                 |1  |1  |1  |0          |0,1,2,3,4,5,6,7  |8  |1  |1  |${TASKS_GLM_ALL}"
     # "QUANT |1|0|64 |INT4|zai-org/GLM-4.7-FP8|0    |0                 |1  |1  |1  |0          |0,1,2,3,4,5,6,7  |8  |1  |1  |${TASKS_GLM_ALL}"
-    "QUANT |1|1|64 |INT4|zai-org/GLM-4.7-FP8|0    |0                 |1  |1  |1  |0          |0,1,2,3,4,5,6,7  |8  |1  |1  |${TASKS_GLM_ALL}"
+    # "QUANT |1|1|64 |INT4|zai-org/GLM-4.7-FP8|0    |0                 |1  |1  |1  |0          |0,1,2,3,4,5,6,7  |8  |1  |1  |${TASKS_GLM_ALL}"
     # "QUANT |1|0|128|INT4|zai-org/GLM-4.7-FP8|0    |0                 |1  |1  |1  |0          |0,1,2,3,4,5,6,7  |8  |1  |1  |${TASKS_GLM_ALL}"
     # "QUANT |1|1|128|INT4|zai-org/GLM-4.7-FP8|0    |0                 |1  |1  |1  |0          |0,1,2,3,4,5,6,7  |8  |1  |1  |${TASKS_GLM_ALL}"
 )
@@ -513,6 +513,16 @@ eval_single_model() {
         centroids_path="${KV_DUMP_BASE}/$(extract_model_short_name "$model_name")/${DUMP_LM_EVAL_TASKS}-${DUMP_TOKENS}-tokens/c_${n_clusters}"
     fi
 
+    # Determine mem-fraction-static: BF16 KV cache uses 2x GPU memory vs FP8,
+    # leaving insufficient room (~15 GB) for CUDA graph capture on large models.
+    # Use 0.75 for BF16 KV cache to free ~4 GB more per GPU for CUDA graphs.
+    local mem_fraction
+    if [[ "$kv_cache_dtype" == "auto" ]]; then
+        mem_fraction="0.65"
+    else
+        mem_fraction="0.8"
+    fi
+
     HADAMARD=$hadamard \
     ROTATE_V=$rotate_v \
     HADAMARD_ORDER=$hadamard_order \
@@ -528,7 +538,7 @@ eval_single_model() {
         --max-queued-requests 256 \
         --page-size 128 \
         --chunked-prefill-size 4096 \
-        --mem-fraction-static 0.8 \
+        --mem-fraction-static "$mem_fraction" \
         --pp-max-micro-batch-size 32 \
         --kv-cache-dtype "$kv_cache_dtype" \
         --prefill-attention-backend fa3 \
