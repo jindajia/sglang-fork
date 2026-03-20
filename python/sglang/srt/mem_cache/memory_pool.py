@@ -982,6 +982,7 @@ class MHATokenToKVPool(KVCache):
                         )
                         for _ in range(self.layer_num)
                     ]
+                    print(f"[DEBUG] v_buffer[0].dtype = {self.v_buffer[0].dtype}", flush=True)
 
                 # Cluster-id buffers for centroid-subtract path (int4/int8 only)
                 if self.dtype in ("int4", "int8") and envs.SGLANG_KV_CENTROIDS_PATH.get():
