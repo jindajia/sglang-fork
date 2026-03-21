@@ -47,16 +47,10 @@ echo "=== Creating conda environment '$CONDA_ENV_NAME' (python 3.12) ==="
 echo "=== Installing r2egym (editable) ==="
 "$PIP" install -e "$R2EGYM_DIR" -q
 
-echo "=== Installing gymnasium ==="
-"$PIP" install gymnasium -q
-
-echo "=== Installing OpenHands (togethercomputer fork, no-deps + ignore python version) ==="
-# OpenHands requires Python >=3.12; install its deps manually below.
+echo "=== Installing OpenHands (togethercomputer fork) ==="
+# Full install with deps; --ignore-requires-python needed only if env is Python 3.12+
 "$PIP" install "git+https://github.com/togethercomputer/OpenHands.git" \
-    --no-deps --ignore-requires-python -q
-# Required transitive deps for openhands.agenthub imports
-"$PIP" install browsergym-core playwright -q
-"$PIP" install "browsergym[core]" -q --no-deps || true
+    --ignore-requires-python -q
 
 echo "=== Fixing huggingface_hub compatibility (HfFolder removed in >=1.0) ==="
 # r2egym/agenthub/utils/utils.py imports HfFolder which was removed;
