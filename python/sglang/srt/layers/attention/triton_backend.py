@@ -11,6 +11,7 @@ import triton.language as tl
 from sgl_kernel import hadamard_transform
 
 from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
+from sglang.srt.layers.attention.q_rotation import maybe_apply_q_rotation
 from sglang.srt.layers.attention.utils import create_flashinfer_kv_indices_triton
 from sglang.srt.layers.dp_attention import get_attention_tp_size
 from sglang.srt.layers.radix_attention import AttentionType
@@ -1043,6 +1044,14 @@ class TritonAttnBackend(AttentionBackend):
                 )
                 q = hadamard_transform(q / math.sqrt(hadamard_order))
                 q = q.view(orig_shape)
+                if layer._use_post_hadamard_qk_rotation:
+                    q = maybe_apply_q_rotation(
+                        q,
+                        layer_id=layer.layer_id,
+                        num_q_heads=layer.tp_q_head_num,
+                        num_kv_heads=layer.tp_k_head_num,
+                        head_dim=layer.head_dim,
+                    )
             # Use optimized quantized attention kernel
             # This dequantizes KV cache on-the-fly inside the kernel, avoiding global memory writes
             self.decode_attention_fwd_quantized(

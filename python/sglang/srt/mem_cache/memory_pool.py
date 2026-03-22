@@ -43,6 +43,7 @@ from sglang.jit_kernel.kvcache import can_use_store_cache, store_cache
 from sglang.srt.configs.mamba_utils import BaseLinearStateParams
 from sglang.srt.constants import GPU_MEMORY_TYPE_KV_CACHE
 from sglang.srt.environ import envs
+from sglang.srt.layers.attention.q_rotation import maybe_apply_k_rotation
 from sglang.srt.layers.attention.nsa import index_buf_accessor
 from sglang.srt.layers.attention.nsa.quant_k_cache import (
     quantize_k_cache,
@@ -1138,6 +1139,14 @@ class MHATokenToKVPool(KVCache):
                     )
                     cache_k = hadamard_transform(cache_k / math.sqrt(hadamard_order))
                     cache_k = cache_k.view(orig_shape)
+                    if layer._use_post_hadamard_qk_rotation:
+                        cache_k = maybe_apply_k_rotation(
+                            cache_k,
+                            layer_id=layer_id,
+                            num_q_heads=layer.tp_q_head_num,
+                            num_kv_heads=layer.tp_k_head_num,
+                            head_dim=layer.qk_head_dim,
+                        )
                     if _rotate_v_enabled:
                         orig_shape = cache_v.shape  # (a, b, c, d)
                         cache_v = cache_v.view(

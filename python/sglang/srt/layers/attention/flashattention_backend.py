@@ -10,6 +10,7 @@ import triton.language as tl
 
 from sglang.srt.configs.model_config import AttentionArch
 from sglang.srt.layers.attention.base_attn_backend import AttentionBackend
+from sglang.srt.layers.attention.q_rotation import maybe_apply_q_rotation
 from sglang.srt.layers.radix_attention import AttentionType
 from sglang.srt.mem_cache.swa_memory_pool import SWAKVPool
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
@@ -916,6 +917,14 @@ class FlashAttentionBackend(AttentionBackend):
                     )
                     q = hadamard_transform(q / math.sqrt(hadamard_order))
                     q = q.view(orig_shape)
+                    if layer._use_post_hadamard_qk_rotation:
+                        q = maybe_apply_q_rotation(
+                            q,
+                            layer_id=layer.layer_id,
+                            num_q_heads=layer.tp_q_head_num,
+                            num_kv_heads=layer.tp_k_head_num,
+                            head_dim=layer.head_dim,
+                        )
 
                 result = flash_attn_varlen_func(
                     q=q.contiguous().view(-1, layer.tp_q_head_num, layer.head_dim),

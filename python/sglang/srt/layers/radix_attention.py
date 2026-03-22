@@ -22,7 +22,10 @@ from torch import nn
 
 from sglang.srt.compilation.compilation_config import register_split_op
 from sglang.srt.compilation.piecewise_context_manager import get_forward_context
-from sglang.srt.layers.attention.q_rotation import maybe_apply_qk_rotation
+from sglang.srt.layers.attention.q_rotation import (
+    maybe_apply_qk_rotation,
+    should_apply_post_hadamard_qk_rotation,
+)
 from sglang.srt.utils.custom_op import register_custom_op
 
 if TYPE_CHECKING:
@@ -93,6 +96,8 @@ class RadixAttention(nn.Module):
         self.pos_encoding_mode = pos_encoding_mode
         self.logit_capping_method = logit_capping_method
         self.xai_temperature_len = -1
+        self._use_post_hadamard_qk_rotation = False
+        self._skip_qk_rotation = False
 
     def forward(
         self,
@@ -103,20 +108,27 @@ class RadixAttention(nn.Module):
         save_kv_cache: bool = True,
         **kwargs,
     ):
+        self._skip_qk_rotation = "k_rope" in kwargs
+        self._use_post_hadamard_qk_rotation = False
         if k is not None:
             # For cross-layer sharing, kv can be None
             assert v is not None
-            if "k_rope" not in kwargs:
+            if not self._skip_qk_rotation:
                 k = k.view(-1, self.tp_k_head_num, self.qk_head_dim)
                 v = v.view(-1, self.tp_v_head_num, self.v_head_dim)
-                q, k = maybe_apply_qk_rotation(
-                    q,
-                    k,
-                    layer_id=self.layer_id,
-                    num_q_heads=self.tp_q_head_num,
-                    num_kv_heads=self.tp_k_head_num,
-                    head_dim=self.qk_head_dim,
+                kv_cache_dtype = getattr(forward_batch.token_to_kv_pool, "dtype", None)
+                self._use_post_hadamard_qk_rotation = (
+                    should_apply_post_hadamard_qk_rotation(kv_cache_dtype)
                 )
+                if not self._use_post_hadamard_qk_rotation:
+                    q, k = maybe_apply_qk_rotation(
+                        q,
+                        k,
+                        layer_id=self.layer_id,
+                        num_q_heads=self.tp_q_head_num,
+                        num_kv_heads=self.tp_k_head_num,
+                        head_dim=self.qk_head_dim,
+                    )
             else:
                 k = k.view(-1, self.tp_k_head_num, self.v_head_dim)
 

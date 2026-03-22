@@ -7,6 +7,7 @@ from typing import Optional
 import torch
 
 logger = logging.getLogger(__name__)
+_hadamard_enabled = os.environ.get("HADAMARD", "0") in ("1", "true", "True")
 
 
 def _parse_compute_dtype(name: str) -> torch.dtype:
@@ -52,16 +53,12 @@ class QRotationManager:
             self._cpu_layers[int(layer_id)] = rotation.contiguous()
 
         self._loaded = True
-        if os.environ.get("HADAMARD", "0") in ("1", "true", "True"):
-            logger.warning(
-                "Both SGLANG_Q_ROTATION_PATH and HADAMARD are enabled. "
-                "This composes two rotations; set HADAMARD=0 if you want a clean comparison."
-            )
         logger.info(
-            "Loaded Q rotation from %s with grouping=%s, compute_dtype=%s",
+            "Loaded Q rotation from %s with grouping=%s, compute_dtype=%s, hadamard_enabled=%s",
             self.path,
             self.grouping,
             self.compute_dtype,
+            _hadamard_enabled,
         )
 
     def get_rotation(self, layer_id: int, device: torch.device) -> tuple[torch.Tensor, str]:
@@ -81,56 +78,144 @@ class QRotationManager:
 _Q_ROTATION_MANAGER = QRotationManager()
 
 
-def _apply_layer_rotation(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    rotation: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    return torch.matmul(q, rotation), torch.matmul(k, rotation)
+def should_apply_post_hadamard_qk_rotation(kv_cache_dtype: Optional[str]) -> bool:
+    return bool(_Q_ROTATION_MANAGER.enabled and _hadamard_enabled and kv_cache_dtype == "int4")
 
 
-def _apply_head_rotation(
-    q: torch.Tensor,
-    k: torch.Tensor,
-    rotation: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    if rotation.shape[0] != q.shape[1]:
+def _apply_layer_rotation(x: torch.Tensor, rotation: torch.Tensor) -> torch.Tensor:
+    return torch.matmul(x, rotation)
+
+
+def _apply_head_rotation(x: torch.Tensor, rotation: torch.Tensor) -> torch.Tensor:
+    if rotation.shape[0] != x.shape[1]:
         raise ValueError(
-            "Head-wise Q rotation expects rotation.shape[0] == num_q_heads, "
-            f"got {rotation.shape[0]} and {q.shape[1]}"
+            "Head-wise Q rotation expects rotation.shape[0] == num_heads, "
+            f"got {rotation.shape[0]} and {x.shape[1]}"
         )
-    if q.shape[1] != k.shape[1]:
-        raise ValueError(
-            "Head-wise Q rotation requires q and k to have the same number of heads. "
-            f"Got q_heads={q.shape[1]}, k_heads={k.shape[1]}"
-        )
-    return (
-        torch.einsum("thd,hdf->thf", q, rotation),
-        torch.einsum("thd,hdf->thf", k, rotation),
-    )
+    return torch.einsum("thd,hdf->thf", x, rotation)
 
 
-def _apply_kv_group_rotation(
+def _apply_q_kv_group_rotation(
     q: torch.Tensor,
-    k: torch.Tensor,
     rotation: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    num_kv_heads: int,
+) -> torch.Tensor:
     num_groups = rotation.shape[0]
-    if k.shape[1] != num_groups:
+    if num_groups != num_kv_heads:
         raise ValueError(
             "KV-group Q rotation expects rotation.shape[0] == num_kv_heads, "
-            f"got {rotation.shape[0]} and {k.shape[1]}"
+            f"got {rotation.shape[0]} and {num_kv_heads}"
         )
     if q.shape[1] % num_groups != 0:
         raise ValueError(
             f"num_q_heads ({q.shape[1]}) must be divisible by num_groups ({num_groups})"
         )
-
     group_size = q.shape[1] // num_groups
     q_grouped = q.reshape(q.shape[0], num_groups, group_size, q.shape[-1])
-    q_rotated = torch.einsum("tghd,gdf->tghf", q_grouped, rotation).reshape_as(q)
-    k_rotated = torch.einsum("tgd,gdf->tgf", k, rotation)
-    return q_rotated, k_rotated
+    return torch.einsum("tghd,gdf->tghf", q_grouped, rotation).reshape_as(q)
+
+
+def _apply_k_kv_group_rotation(
+    k: torch.Tensor,
+    rotation: torch.Tensor,
+    num_kv_heads: int,
+) -> torch.Tensor:
+    num_groups = rotation.shape[0]
+    if num_groups != num_kv_heads:
+        raise ValueError(
+            "KV-group Q rotation expects rotation.shape[0] == num_kv_heads, "
+            f"got {rotation.shape[0]} and {num_kv_heads}"
+        )
+    if k.shape[1] != num_groups:
+        raise ValueError(
+            f"num_kv_heads ({k.shape[1]}) must match num_groups ({num_groups})"
+        )
+    return torch.einsum("tgd,gdf->tgf", k, rotation)
+
+
+def _apply_rotation_to_q(
+    q: torch.Tensor,
+    rotation: torch.Tensor,
+    grouping: str,
+    num_kv_heads: int,
+) -> torch.Tensor:
+    if grouping == "layer":
+        return _apply_layer_rotation(q, rotation)
+    if grouping == "head":
+        return _apply_head_rotation(q, rotation)
+    if grouping == "kv_group":
+        return _apply_q_kv_group_rotation(q, rotation, num_kv_heads)
+    raise ValueError(
+        f"Unsupported Q rotation grouping '{grouping}' in {_Q_ROTATION_MANAGER.path}"
+    )
+
+
+def _apply_rotation_to_k(
+    k: torch.Tensor,
+    rotation: torch.Tensor,
+    grouping: str,
+    num_kv_heads: int,
+) -> torch.Tensor:
+    if grouping == "layer":
+        return _apply_layer_rotation(k, rotation)
+    if grouping == "head":
+        return _apply_head_rotation(k, rotation)
+    if grouping == "kv_group":
+        return _apply_k_kv_group_rotation(k, rotation, num_kv_heads)
+    raise ValueError(
+        f"Unsupported Q rotation grouping '{grouping}' in {_Q_ROTATION_MANAGER.path}"
+    )
+
+
+def _reshape_for_rotation(
+    x: torch.Tensor,
+    num_heads: int,
+    head_dim: int,
+    rotation_dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Size]:
+    original_shape = x.shape
+    x_work = x.reshape(-1, num_heads, head_dim).to(dtype=rotation_dtype)
+    return x_work, original_shape
+
+
+def _restore_rotated_tensor(x: torch.Tensor, original_shape: torch.Size, dtype: torch.dtype):
+    return x.to(dtype=dtype).reshape(original_shape)
+
+
+@torch._dynamo.disable()
+def maybe_apply_q_rotation(
+    q: torch.Tensor,
+    *,
+    layer_id: int,
+    num_q_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+) -> torch.Tensor:
+    if not _Q_ROTATION_MANAGER.enabled:
+        return q
+
+    rotation, grouping = _Q_ROTATION_MANAGER.get_rotation(layer_id, q.device)
+    q_work, q_shape = _reshape_for_rotation(q, num_q_heads, head_dim, rotation.dtype)
+    q_rotated = _apply_rotation_to_q(q_work, rotation, grouping, num_kv_heads)
+    return _restore_rotated_tensor(q_rotated, q_shape, q.dtype)
+
+
+@torch._dynamo.disable()
+def maybe_apply_k_rotation(
+    k: torch.Tensor,
+    *,
+    layer_id: int,
+    num_q_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+) -> torch.Tensor:
+    if not _Q_ROTATION_MANAGER.enabled:
+        return k
+
+    rotation, grouping = _Q_ROTATION_MANAGER.get_rotation(layer_id, k.device)
+    k_work, k_shape = _reshape_for_rotation(k, num_kv_heads, head_dim, rotation.dtype)
+    k_rotated = _apply_rotation_to_k(k_work, rotation, grouping, num_kv_heads)
+    return _restore_rotated_tensor(k_rotated, k_shape, k.dtype)
 
 
 @torch._dynamo.disable()
@@ -146,24 +231,18 @@ def maybe_apply_qk_rotation(
     if not _Q_ROTATION_MANAGER.enabled or k is None:
         return q, k
 
-    rotation, grouping = _Q_ROTATION_MANAGER.get_rotation(layer_id, q.device)
-
-    q_shape = q.shape
-    k_shape = k.shape
-    q_work = q.reshape(-1, num_q_heads, head_dim).to(dtype=rotation.dtype)
-    k_work = k.reshape(-1, num_kv_heads, head_dim).to(dtype=rotation.dtype)
-
-    if grouping == "layer":
-        q_rotated, k_rotated = _apply_layer_rotation(q_work, k_work, rotation)
-    elif grouping == "head":
-        q_rotated, k_rotated = _apply_head_rotation(q_work, k_work, rotation)
-    elif grouping == "kv_group":
-        q_rotated, k_rotated = _apply_kv_group_rotation(q_work, k_work, rotation)
-    else:
-        raise ValueError(
-            f"Unsupported Q rotation grouping '{grouping}' in {_Q_ROTATION_MANAGER.path}"
-        )
-
-    q_rotated = q_rotated.to(dtype=q.dtype).reshape(q_shape)
-    k_rotated = k_rotated.to(dtype=k.dtype).reshape(k_shape)
+    q_rotated = maybe_apply_q_rotation(
+        q,
+        layer_id=layer_id,
+        num_q_heads=num_q_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+    )
+    k_rotated = maybe_apply_k_rotation(
+        k,
+        layer_id=layer_id,
+        num_q_heads=num_q_heads,
+        num_kv_heads=num_kv_heads,
+        head_dim=head_dim,
+    )
     return q_rotated, k_rotated
