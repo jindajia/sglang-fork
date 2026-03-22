@@ -1,0 +1,17 @@
+{
+  "num_runs": 1,
+  "metrics_per_run": [
+    {
+      "gpqa/chars": 29218.338383838385,
+      "gpqa/chars:std": 13236.61363097826,
+      "gpqa/score:std": 0.492573145060065,
+      "gpqa/score": 0.5858585858585859
+    }
+  ],
+  "mean_metrics": {
+    "gpqa/chars": 29218.338383838385,
+    "gpqa/chars:std": 13236.61363097826,
+    "gpqa/score": 0.5858585858585859,
+    "gpqa/score:std": 0.492573145060065
+  }
+}
