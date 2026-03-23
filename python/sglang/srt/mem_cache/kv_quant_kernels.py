@@ -282,6 +282,8 @@ def quantized_set_kv_int4_triton(
         k_scales_zeros_buffer.stride(1),
         k_scales_zeros_buffer.stride(2),
         BLOCK_SIZE_DIM=BLOCK_SIZE_DIM,
+        num_warps=1,
+        num_stages=1,
     )
 
     # Quantize V
@@ -303,6 +305,8 @@ def quantized_set_kv_int4_triton(
         v_scales_zeros_buffer.stride(1),
         v_scales_zeros_buffer.stride(2),
         BLOCK_SIZE_DIM=BLOCK_SIZE_DIM,
+        num_warps=1,
+        num_stages=1,
     )
 
 
