@@ -90,6 +90,7 @@ _rotate_v_enabled = 1 if os.environ.get("ROTATE_V", "0") in ("1", "true", "True"
 _hadamard_order = int(os.environ.get("HADAMARD_ORDER", "16"))
 # Fused path uses fp32 scaling from bf16 (x.float()/sqrt(n)); unfused uses bf16/sqrt then
 # CUDA Hadamard — numerics may differ slightly at int4 boundaries.
+# Also gates in-kernel Q Hadamard for int4 GQA decode (`triton_backend`); same env name.
 _fuse_hadamard_int4_kv = os.environ.get("SGLANG_FUSE_HADAMARD_INT4_KV", "1").lower() in (
     "1",
     "true",

@@ -21,6 +21,7 @@ It supports page size = 1.
 # https://github.com/ModelTC/lightllm/blob/96353e868a840db4d103138caf15ed9dbea8c186/lightllm/models/deepseek2/triton_kernel/gqa_flash_decoding_stage2.py
 
 import logging
+import math
 
 import triton
 import triton.language as tl
@@ -39,6 +40,21 @@ _MIN_BLOCK_KV = 32
 def tanh(x):
     # Tanh is just a scaled sigmoid
     return 2 * tl.sigmoid(2 * x) - 1
+
+
+@triton.jit
+def _fwht_last_dim_vec(x, D: tl.constexpr, LOG: tl.constexpr):
+    """Blocked FWHT on 1D tensor of length ``D`` (MHA int4 Q; same butterfly as fused int4 KV)."""
+    i = tl.arange(0, D)
+    for s in tl.static_range(0, LOG):
+        stride = 1 << s
+        partner = i ^ stride
+        lo = tl.minimum(i, partner)
+        hi = tl.maximum(i, partner)
+        u0 = tl.gather(x, lo, 0)
+        v0 = tl.gather(x, hi, 0)
+        x = tl.where(i == lo, u0 + v0, u0 - v0)
+    return x
 
 
 @triton.jit
@@ -400,6 +416,10 @@ def _fwd_kernel_stage1_quant_int4(
     Lk: tl.constexpr,
     Lv: tl.constexpr,
     xai_temperature_len: tl.constexpr,
+    FUSE_Q_HADAMARD: tl.constexpr,
+    HADAMARD_LOG: tl.constexpr,
+    HADAMARD_PRE_SCALE: tl.constexpr,
+    Q_FWHT_DIM: tl.constexpr,
 ):
     cur_batch = tl.program_id(0)
     cur_head = tl.program_id(1)
@@ -437,19 +457,26 @@ def _fwd_kernel_stage1_quant_int4(
     acc_second = tl.zeros([BLOCK_DV // 2], dtype=tl.float32)
 
     if split_kv_end > split_kv_start:
-        # Load q split into first half and second half for INT4
         offs_d_first = tl.arange(0, BLOCK_DMODEL // 2)
         offs_d_second = tl.arange(0, BLOCK_DMODEL // 2)
         mask_d_first = offs_d_first < (Lk // 2)
         mask_d_second = offs_d_second < (Lk - Lk // 2)
 
-        off_q_first = cur_batch * stride_qbs + cur_head * stride_qh + offs_d_first
-        off_q_second = (
-            cur_batch * stride_qbs + cur_head * stride_qh + (Lk // 2) + offs_d_second
-        )
+        q_main = tl.load(Q + off_q, mask=mask_d, other=0.0)
+        if FUSE_Q_HADAMARD:
+            c = tl.arange(0, BLOCK_DMODEL)
+            q_fp = q_main.to(tl.float32)
+            q_w = tl.where(c < Q_FWHT_DIM, q_fp * HADAMARD_PRE_SCALE, q_fp)
+            j = tl.arange(0, Q_FWHT_DIM)
+            x_sub = tl.gather(q_w, j, 0)
+            x_sub = _fwht_last_dim_vec(x_sub, Q_FWHT_DIM, HADAMARD_LOG)
+            safe_c = tl.where(c < Q_FWHT_DIM, c, 0)
+            x_g = tl.gather(x_sub, safe_c, 0)
+            q_main = tl.where(c < Q_FWHT_DIM, x_g, q_fp).to(q_main.dtype)
 
-        q_first = tl.load(Q + off_q_first, mask=mask_d_first, other=0.0)
-        q_second = tl.load(Q + off_q_second, mask=mask_d_second, other=0.0)
+        q_first = tl.where(mask_d_first, tl.gather(q_main, offs_d_first, 0), 0.0)
+        idx_second = (Lk // 2) + offs_d_second
+        q_second = tl.where(mask_d_second, tl.gather(q_main, idx_second, 0), 0.0)
 
         for start_n in range(split_kv_start, split_kv_end, BLOCK_N):
             offs_n = start_n + tl.arange(0, BLOCK_N)
@@ -830,6 +857,27 @@ def _fwd_grouped_kernel_stage1_quant_int8(
 
 
 @triton.jit
+def _fwht_last_dim_batch(x, D: tl.constexpr, LOG: tl.constexpr, BLOCK_H: tl.constexpr):
+    """Blocked FWHT on the last dimension of x [BLOCK_H, D] (same butterfly as fused int4 KV).
+
+    Applies ``LOG`` butterfly stages; effective Hadamard block size along the last dim is ``2**LOG``.
+    """
+    i = tl.arange(0, D)
+    for s in tl.static_range(0, LOG):
+        stride = 1 << s
+        partner = i ^ stride
+        lo = tl.minimum(i, partner)
+        hi = tl.maximum(i, partner)
+        lo_b = tl.broadcast_to(lo[None, :], [BLOCK_H, D])
+        hi_b = tl.broadcast_to(hi[None, :], [BLOCK_H, D])
+        ii = tl.broadcast_to(i[None, :], [BLOCK_H, D])
+        u0 = tl.gather(x, lo_b, 1)
+        v0 = tl.gather(x, hi_b, 1)
+        x = tl.where(ii == lo_b, u0 + v0, u0 - v0)
+    return x
+
+
+@triton.jit
 def _fwd_grouped_kernel_stage1_quant_int4(
     Q,
     K_Buffer,  # Quantized INT4 [cache_size, num_heads, head_dim//2] uint8 (packed)
@@ -865,6 +913,10 @@ def _fwd_grouped_kernel_stage1_quant_int4(
     xai_temperature_len: tl.constexpr,
     Lk: tl.constexpr,
     Lv: tl.constexpr,
+    FUSE_Q_HADAMARD: tl.constexpr,
+    HADAMARD_LOG: tl.constexpr,
+    HADAMARD_PRE_SCALE: tl.constexpr,
+    Q_FWHT_DIM: tl.constexpr,
 ):
     cur_batch = tl.program_id(0)
     cur_head_id = tl.program_id(1)
@@ -916,32 +968,52 @@ def _fwd_grouped_kernel_stage1_quant_int4(
     acc_second = tl.zeros([BLOCK_H, BLOCK_DV // 2], dtype=tl.float32)
 
     if split_kv_end > split_kv_start:
-        # Split Q into first and second halves for INT4 dot product
+        # Main Q block (RoPE / non-DPE part); DPE loaded separately below
         offs_d_first = tl.arange(0, BLOCK_DMODEL // 2)
         offs_d_second = tl.arange(BLOCK_DMODEL // 2, BLOCK_DMODEL)
         mask_d_first = offs_d_first < (Lk // 2)
         mask_d_second = offs_d_second < Lk
 
-        offs_q_first = (
-            cur_batch * stride_qbs
-            + cur_head[:, None] * stride_qh
-            + offs_d_first[None, :]
+        q_main = tl.load(
+            Q + offs_q,
+            mask=(mask_h[:, None]) & (mask_d[None, :]),
+            other=0.0,
         )
-        offs_q_second = (
-            cur_batch * stride_qbs
-            + cur_head[:, None] * stride_qh
-            + offs_d_second[None, :]
-        )
+        if FUSE_Q_HADAMARD:
+            c = tl.arange(0, BLOCK_DMODEL)[None, :]
+            q_fp = q_main.to(tl.float32)
+            q_w = tl.where(c < Q_FWHT_DIM, q_fp * HADAMARD_PRE_SCALE, q_fp)
+            x_sub = tl.gather(
+                q_w,
+                tl.broadcast_to(tl.arange(0, Q_FWHT_DIM)[None, :], [BLOCK_H, Q_FWHT_DIM]),
+                1,
+            )
+            x_sub = _fwht_last_dim_batch(x_sub, Q_FWHT_DIM, HADAMARD_LOG, BLOCK_H)
+            safe_c = tl.where(c < Q_FWHT_DIM, c, 0)
+            x_g = tl.gather(
+                x_sub,
+                tl.broadcast_to(safe_c, [BLOCK_H, BLOCK_DMODEL]),
+                1,
+            )
+            q_main = tl.where(c < Q_FWHT_DIM, x_g, q_fp).to(q_main.dtype)
 
-        q_first = tl.load(
-            Q + offs_q_first,
-            mask=(mask_h[:, None]) & (mask_d_first[None, :]),
-            other=0.0,
+        q_first = tl.where(
+            (mask_h[:, None]) & (mask_d_first[None, :]),
+            tl.gather(
+                q_main,
+                tl.broadcast_to(offs_d_first[None, :], [BLOCK_H, BLOCK_DMODEL // 2]),
+                1,
+            ),
+            0.0,
         )
-        q_second = tl.load(
-            Q + offs_q_second,
-            mask=(mask_h[:, None]) & (mask_d_second[None, :]),
-            other=0.0,
+        q_second = tl.where(
+            (mask_h[:, None]) & (mask_d_second[None, :]),
+            tl.gather(
+                q_main,
+                tl.broadcast_to(offs_d_second[None, :], [BLOCK_H, BLOCK_DMODEL // 2]),
+                1,
+            ),
+            0.0,
         )
 
         if BLOCK_DPE > 0:
@@ -1286,6 +1358,8 @@ def _decode_att_m_fwd_quant_int4(
     sm_scale,
     logit_cap,
     xai_temperature_len=-1,
+    fuse_q_hadamard=False,
+    hadamard_order=16,
 ):
     """
     INT4 quantized KV cache attention wrapper.
@@ -1315,6 +1389,17 @@ def _decode_att_m_fwd_quant_int4(
 
     BLOCK_DMODEL = triton.next_power_of_2(Lk)
     BLOCK_DV = triton.next_power_of_2(Lv)
+
+    fuse = bool(fuse_q_hadamard)
+    q_fwht_dim = Lk
+    if fuse:
+        from sglang.QuantKernel.fused_hadamard_int4_kv import (
+            validate_hadamard_order_for_kv_fuse,
+        )
+
+        validate_hadamard_order_for_kv_fuse(hadamard_order, q_fwht_dim)
+    hadamard_log = int(math.log2(hadamard_order)) if fuse else 0
+    hadamard_pre_scale = (1.0 / math.sqrt(float(hadamard_order))) if fuse else 1.0
 
     _fwd_kernel_stage1_quant_int4[grid](
         q,
@@ -1352,6 +1437,10 @@ def _decode_att_m_fwd_quant_int4(
         num_stages=2,
         Lk=Lk,
         Lv=Lv,
+        FUSE_Q_HADAMARD=1 if fuse else 0,
+        HADAMARD_LOG=hadamard_log,
+        HADAMARD_PRE_SCALE=hadamard_pre_scale,
+        Q_FWHT_DIM=q_fwht_dim,
     )
 
 
@@ -1726,6 +1815,8 @@ def _decode_grouped_att_m_fwd_quant_int4(
     sm_scale,
     logit_cap,
     xai_temperature_len=-1,
+    fuse_q_hadamard=False,
+    hadamard_order=16,
 ):
     BLOCK = 32
     # For INT4, k_buffer is packed, so actual Lk is 2x the last dimension
@@ -1749,6 +1840,17 @@ def _decode_grouped_att_m_fwd_quant_int4(
 
     batch, head_num = q.shape[0], q.shape[1]
     kv_group_num = q.shape[1] // k_buffer.shape[1]
+
+    fuse = bool(fuse_q_hadamard)
+    q_fwht_dim = Lk - BLOCK_DPE
+    if fuse:
+        from sglang.QuantKernel.fused_hadamard_int4_kv import (
+            validate_hadamard_order_for_kv_fuse,
+        )
+
+        validate_hadamard_order_for_kv_fuse(hadamard_order, q_fwht_dim)
+    hadamard_log = int(math.log2(hadamard_order)) if fuse else 0
+    hadamard_pre_scale = (1.0 / math.sqrt(float(hadamard_order))) if fuse else 1.0
 
     BLOCK_H = 16
     MAX_KV_SPLITS = max_kv_splits
@@ -1801,6 +1903,10 @@ def _decode_grouped_att_m_fwd_quant_int4(
         num_stages=num_stages,
         Lk=Lk,
         Lv=Lv,
+        FUSE_Q_HADAMARD=1 if fuse else 0,
+        HADAMARD_LOG=hadamard_log,
+        HADAMARD_PRE_SCALE=hadamard_pre_scale,
+        Q_FWHT_DIM=q_fwht_dim,
         **extra_kargs,
     )
 
@@ -2027,6 +2133,8 @@ def decode_attention_fwd_normal_quant(
     logit_cap=0.0,
     sinks=None,
     xai_temperature_len=-1,
+    fuse_q_hadamard=False,
+    hadamard_order=16,
 ):
     """
     Normal (MHA) attention forward with quantized (INT4/INT8) KV cache.
@@ -2071,6 +2179,8 @@ def decode_attention_fwd_normal_quant(
             sm_scale,
             logit_cap,
             xai_temperature_len,
+            fuse_q_hadamard=fuse_q_hadamard,
+            hadamard_order=hadamard_order,
         )
         # For INT4, v_buffer is packed (half size), but stage2 needs full dimension
         # Create a dummy tensor with correct shape for stage2 to extract Lv
@@ -2110,6 +2220,8 @@ def decode_attention_fwd_grouped_quant(
     logit_cap=0.0,
     sinks=None,
     xai_temperature_len=-1,
+    fuse_q_hadamard=False,
+    hadamard_order=16,
 ):
     """
     Grouped (GQA/MQA) attention forward with quantized (INT4/INT8) KV cache.
@@ -2154,6 +2266,8 @@ def decode_attention_fwd_grouped_quant(
             sm_scale,
             logit_cap,
             xai_temperature_len,
+            fuse_q_hadamard=fuse_q_hadamard,
+            hadamard_order=hadamard_order,
         )
         # For INT4, v_buffer is packed (half size), but stage2 needs full dimension
         # Create a dummy tensor with correct shape for stage2 to extract Lv
@@ -2193,6 +2307,8 @@ def decode_attention_fwd_quantized(
     logit_cap=0.0,
     sinks=None,
     xai_temperature_len=-1,
+    fuse_q_hadamard=False,
+    hadamard_order=16,
 ):
     """
     Attention forward with quantized (INT4/INT8) KV cache.
@@ -2227,6 +2343,8 @@ def decode_attention_fwd_quantized(
             logit_cap=logit_cap,
             sinks=sinks,
             xai_temperature_len=xai_temperature_len,
+            fuse_q_hadamard=fuse_q_hadamard,
+            hadamard_order=hadamard_order,
         )
     else:
         # GQA/MQA/MLA
@@ -2248,6 +2366,8 @@ def decode_attention_fwd_quantized(
             logit_cap=logit_cap,
             sinks=sinks,
             xai_temperature_len=xai_temperature_len,
+            fuse_q_hadamard=fuse_q_hadamard,
+            hadamard_order=hadamard_order,
         )
 
 

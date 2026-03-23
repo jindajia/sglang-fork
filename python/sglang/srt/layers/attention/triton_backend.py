@@ -31,6 +31,13 @@ if TYPE_CHECKING:
 _hadamard_enabled = 1 if os.environ.get("HADAMARD", "0") in ("1", "true", "True") else 0
 _rotate_v_enabled = 1 if os.environ.get("ROTATE_V", "0") in ("1", "true", "True") else 0
 _hadamard_order = int(os.environ.get("HADAMARD_ORDER", "16"))
+# Match `memory_pool._fuse_hadamard_int4_kv`: when false, skip in-kernel Q Hadamard and use
+# `hadamard_transform` before decode (same env as fused Hadamard + int4 KV write).
+_fuse_hadamard_int4_kv = os.environ.get("SGLANG_FUSE_HADAMARD_INT4_KV", "1").lower() in (
+    "1",
+    "true",
+    "yes",
+)
 
 
 def logit_capping_mod(logit_capping_method, logit_cap):
@@ -1032,7 +1039,13 @@ class TritonAttnBackend(AttentionBackend):
         # Check if KV cache is quantized (INT4/INT8) for optimized attention
         kv_pool = forward_batch.token_to_kv_pool
         if hasattr(kv_pool, "dtype") and kv_pool.dtype in ("int4", "int8"):
-            if kv_pool.dtype == "int4" and _hadamard_enabled:
+            # int4: optional Q Hadamard fused inside Triton decode (MHA or GQA; see decode_attention).
+            fuse_q_hadamard_in_kernel = (
+                kv_pool.dtype == "int4"
+                and _hadamard_enabled
+                and _fuse_hadamard_int4_kv
+            )
+            if kv_pool.dtype == "int4" and _hadamard_enabled and not fuse_q_hadamard_in_kernel:
                 q = q.contiguous().view(-1, layer.tp_q_head_num, layer.head_dim)
                 hadamard_order = _hadamard_order
                 orig_shape = q.shape  # (a, b, c, d)
@@ -1063,6 +1076,8 @@ class TritonAttnBackend(AttentionBackend):
                 logit_cap=logits_soft_cap,
                 sinks=sinks,
                 xai_temperature_len=layer.xai_temperature_len,
+                fuse_q_hadamard=fuse_q_hadamard_in_kernel,
+                hadamard_order=_hadamard_order,
             )
             if kv_pool.dtype == "int4" and _hadamard_enabled and _rotate_v_enabled:
                 hadamard_order = _hadamard_order
