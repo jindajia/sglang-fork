@@ -88,6 +88,13 @@ _is_hip = is_hip()
 _hadamard_enabled = 1 if os.environ.get("HADAMARD", "0") in ("1", "true", "True") else 0
 _rotate_v_enabled = 1 if os.environ.get("ROTATE_V", "0") in ("1", "true", "True") else 0
 _hadamard_order = int(os.environ.get("HADAMARD_ORDER", "16"))
+# Fused path uses fp32 scaling from bf16 (x.float()/sqrt(n)); unfused uses bf16/sqrt then
+# CUDA Hadamard — numerics may differ slightly at int4 boundaries.
+_fuse_hadamard_int4_kv = os.environ.get("SGLANG_FUSE_HADAMARD_INT4_KV", "1").lower() in (
+    "1",
+    "true",
+    "yes",
+)
 
 
 def get_tensor_size_bytes(t: Union[torch.Tensor, List[torch.Tensor]]):
@@ -1129,6 +1136,27 @@ class MHATokenToKVPool(KVCache):
                     assert (
                         cache_k.shape[-1] % hadamard_order == 0
                     ), f"head_dim must be divisible by {hadamard_order}"
+                    if _fuse_hadamard_int4_kv:
+                        from sglang.QuantKernel.fused_hadamard_int4_kv import (
+                            quantized_set_kv_int4_hadamard_fused_triton,
+                            validate_hadamard_order_for_kv_fuse,
+                        )
+
+                        validate_hadamard_order_for_kv_fuse(
+                            hadamard_order, cache_k.shape[-1]
+                        )
+                        quantized_set_kv_int4_hadamard_fused_triton(
+                            cache_k,
+                            cache_v,
+                            loc,
+                            self.k_buffer[layer_id - self.start_layer],
+                            self.v_buffer[layer_id - self.start_layer],
+                            self.k_scales_zeros[layer_id - self.start_layer],
+                            self.v_scales_zeros[layer_id - self.start_layer],
+                            hadamard_order,
+                            rotate_v=bool(_rotate_v_enabled),
+                        )
+                        return
                     # reshap cache_k shape from (a, b, c, d) to (a, b, c, d // hadamard_order, hadamard_order)
                     orig_shape = cache_k.shape  # (a, b, c, d)
                     cache_k = cache_k.view(
