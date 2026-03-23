@@ -283,3 +283,4 @@ eval_logs/
 results/
 .venv/
 datasets/
+q_rotation_layer_second_moment_damp01.pt
