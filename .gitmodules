@@ -2,3 +2,7 @@
 	path = tore-eval
 	url = git@github.com:togethercomputer/tore-eval.git
 	branch = jisen/kv_rotation_eval
+[submodule "tore-speed-eval"]
+	path = tore-speed-eval
+	url = git@github.com:togethercomputer/tore-speed-eval.git
+	branch = jisen/aurora-eval

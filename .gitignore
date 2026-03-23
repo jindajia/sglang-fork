@@ -278,3 +278,6 @@ eval_logs/
 .venv/
 datasets/
 server_logs/
+swe_bench_verified_results/
+throughput_results/
+throughput_logs/
