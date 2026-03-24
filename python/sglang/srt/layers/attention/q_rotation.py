@@ -61,13 +61,11 @@ class QRotationManager:
             _hadamard_enabled,
         )
 
-    def get_rotation(self, layer_id: int, device: torch.device) -> tuple[torch.Tensor, str]:
+    def get_rotation(self, layer_id: int, device: torch.device) -> tuple[Optional[torch.Tensor], str]:
         self._load_if_needed()
         rotation = self._cpu_layers.get(layer_id)
         if rotation is None:
-            raise KeyError(
-                f"Layer {layer_id} not found in Q rotation file {self.path}"
-            )
+            return None, self.grouping or "layer"
 
         cache_key = (layer_id, str(device))
         if cache_key not in self._device_cache:
@@ -167,6 +165,23 @@ def _apply_rotation_to_k(
     )
 
 
+def _apply_inverse_rotation_to_k(
+    k: torch.Tensor,
+    rotation: torch.Tensor,
+    grouping: str,
+    num_kv_heads: int,
+) -> torch.Tensor:
+    if grouping == "layer":
+        return torch.matmul(k, rotation.t())
+    if grouping == "head":
+        return torch.einsum("thd,hfd->thf", k, rotation)
+    if grouping == "kv_group":
+        return torch.einsum("tgd,gfd->tgf", k, rotation)
+    raise ValueError(
+        f"Unsupported Q rotation grouping '{grouping}' in {_Q_ROTATION_MANAGER.path}"
+    )
+
+
 def _reshape_for_rotation(
     x: torch.Tensor,
     num_heads: int,
@@ -195,6 +210,8 @@ def maybe_apply_q_rotation(
         return q
 
     rotation, grouping = _Q_ROTATION_MANAGER.get_rotation(layer_id, q.device)
+    if rotation is None:
+        return q
     q_work, q_shape = _reshape_for_rotation(q, num_q_heads, head_dim, rotation.dtype)
     q_rotated = _apply_rotation_to_q(q_work, rotation, grouping, num_kv_heads)
     return _restore_rotated_tensor(q_rotated, q_shape, q.dtype)
@@ -213,9 +230,25 @@ def maybe_apply_k_rotation(
         return k
 
     rotation, grouping = _Q_ROTATION_MANAGER.get_rotation(layer_id, k.device)
+    if rotation is None:
+        return k
     k_work, k_shape = _reshape_for_rotation(k, num_kv_heads, head_dim, rotation.dtype)
     k_rotated = _apply_rotation_to_k(k_work, rotation, grouping, num_kv_heads)
     return _restore_rotated_tensor(k_rotated, k_shape, k.dtype)
+
+
+@torch._dynamo.disable()
+def apply_inverse_k_rotation(
+    k: torch.Tensor,
+    *,
+    layer_id: int,
+    num_kv_heads: int,
+    head_dim: int,
+) -> torch.Tensor:
+    rotation, grouping = _Q_ROTATION_MANAGER.get_rotation(layer_id, k.device)
+    k_work, k_shape = _reshape_for_rotation(k, num_kv_heads, head_dim, rotation.dtype)
+    k_inv = _apply_inverse_rotation_to_k(k_work, rotation, grouping, num_kv_heads)
+    return _restore_rotated_tensor(k_inv, k_shape, k.dtype)
 
 
 @torch._dynamo.disable()

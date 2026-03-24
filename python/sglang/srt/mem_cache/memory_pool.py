@@ -90,6 +90,79 @@ _hadamard_enabled = 1 if os.environ.get("HADAMARD", "0") in ("1", "true", "True"
 _rotate_v_enabled = 1 if os.environ.get("ROTATE_V", "0") in ("1", "true", "True") else 0
 _hadamard_order = int(os.environ.get("HADAMARD_ORDER", "16"))
 
+_quant_sim_layers_str = os.environ.get("SGLANG_QUANT_SIM_LAYERS", "")
+_quant_sim_layers: set[int] = (
+    {int(x.strip()) for x in _quant_sim_layers_str.split(",") if x.strip()}
+    if _quant_sim_layers_str
+    else set()
+)
+
+_quant_sim_rotation_path = os.environ.get("SGLANG_QUANT_SIM_ROTATION_PATH", "")
+_quant_sim_rotations: dict[int, torch.Tensor] = {}
+_quant_sim_grouping: str = "layer"
+
+if _quant_sim_layers and _quant_sim_rotation_path:
+    _sim_state = torch.load(_quant_sim_rotation_path, map_location="cpu")
+    _quant_sim_grouping = _sim_state.get("source_grouping", _sim_state.get("grouping", "layer"))
+    for lid, ldata in _sim_state["layers"].items():
+        _quant_sim_rotations[int(lid)] = ldata["rotation"].to(dtype=torch.float32).contiguous()
+    del _sim_state
+    logger.info(
+        "Quant simulation enabled for layers %s with rotation from %s (grouping=%s)",
+        sorted(_quant_sim_layers), _quant_sim_rotation_path, _quant_sim_grouping,
+    )
+elif _quant_sim_layers:
+    logger.info("Quant simulation enabled for layers %s (Hadamard only, no QR)", sorted(_quant_sim_layers))
+
+
+def _simulate_int4_quantize_dequantize(x: torch.Tensor) -> torch.Tensor:
+    """Simulate per-head asymmetric int4 quantization noise (matches Triton int4 kernel)."""
+    x_fp32 = x.float()
+    val_min = x_fp32.amin(dim=-1, keepdim=True)
+    val_max = x_fp32.amax(dim=-1, keepdim=True)
+    val_range = (val_max - val_min).clamp(min=1e-8)
+    scale = val_range / 15.0
+    zero = -val_min / scale
+    q = (x_fp32 / scale + zero + 0.5).to(torch.int32).clamp(0, 15)
+    return ((q.float() - zero) * scale).to(x.dtype)
+
+
+_quant_sim_device_cache: dict[tuple[int, str, str], torch.Tensor] = {}
+
+
+def _sim_get_rotation(layer_id: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    key = (layer_id, str(device), str(dtype))
+    cached = _quant_sim_device_cache.get(key)
+    if cached is not None:
+        return cached
+    R = _quant_sim_rotations[layer_id].to(device=device, dtype=dtype)
+    _quant_sim_device_cache[key] = R
+    return R
+
+
+def _sim_apply_rotation(k: torch.Tensor, layer_id: int) -> torch.Tensor:
+    """Apply QR rotation for simulation (independent of _Q_ROTATION_MANAGER)."""
+    R = _sim_get_rotation(layer_id, k.device, k.dtype)
+    if _quant_sim_grouping == "layer":
+        return torch.matmul(k, R)
+    if _quant_sim_grouping == "kv_group":
+        return torch.einsum("tgd,gdf->tgf", k, R)
+    if _quant_sim_grouping == "head":
+        return torch.einsum("thd,hdf->thf", k, R)
+    raise ValueError(f"Unsupported sim grouping: {_quant_sim_grouping}")
+
+
+def _sim_apply_inverse_rotation(k: torch.Tensor, layer_id: int) -> torch.Tensor:
+    """Apply inverse QR rotation for simulation."""
+    R = _sim_get_rotation(layer_id, k.device, k.dtype)
+    if _quant_sim_grouping == "layer":
+        return torch.matmul(k, R.t())
+    if _quant_sim_grouping == "kv_group":
+        return torch.einsum("tgd,gfd->tgf", k, R)
+    if _quant_sim_grouping == "head":
+        return torch.einsum("thd,hfd->thf", k, R)
+    raise ValueError(f"Unsupported sim grouping: {_quant_sim_grouping}")
+
 
 def get_tensor_size_bytes(t: Union[torch.Tensor, List[torch.Tensor]]):
     if isinstance(t, list):
@@ -1184,6 +1257,36 @@ class MHATokenToKVPool(KVCache):
 
             # Early return - INT4/INT8 quantization is complete
             return
+
+        if _quant_sim_layers and layer_id in _quant_sim_layers:
+            # Simulate int4+H+QR quantization noise on this layer's K cache.
+            # IMPORTANT: SGLANG_Q_ROTATION_PATH must NOT be set so that
+            # radix_attention does not apply QR to Q/K. This simulation
+            # handles everything independently via SGLANG_QUANT_SIM_ROTATION_PATH.
+            #
+            # Math: K_stored = H^{-1} R^{-1} dequant(int4(R H K))
+            # During attention: score = Q^T @ K_stored = Q^T H R^T dequant(int4(R H K))
+            # This equals the real int4 pipeline: (R H Q)^T dequant(int4(R H K))
+            cache_k = cache_k.view(-1, layer.tp_k_head_num, layer.qk_head_dim)
+            hadamard_order = _hadamard_order
+            orig_shape = cache_k.shape
+            # Forward: Hadamard
+            cache_k = cache_k.view(*orig_shape[:-1], orig_shape[-1] // hadamard_order, hadamard_order)
+            cache_k = hadamard_transform(cache_k / math.sqrt(hadamard_order))
+            cache_k = cache_k.view(orig_shape)
+            # Forward: QR rotation (using self-contained rotation, not _Q_ROTATION_MANAGER)
+            has_rotation = layer_id in _quant_sim_rotations
+            if has_rotation:
+                cache_k = _sim_apply_rotation(cache_k, layer_id)
+            # Simulate int4 quantize → dequantize
+            cache_k = _simulate_int4_quantize_dequantize(cache_k)
+            # Inverse: QR rotation
+            if has_rotation:
+                cache_k = _sim_apply_inverse_rotation(cache_k, layer_id)
+            # Inverse: Hadamard (H is its own inverse when normalized)
+            cache_k = cache_k.view(*orig_shape[:-1], orig_shape[-1] // hadamard_order, hadamard_order)
+            cache_k = hadamard_transform(cache_k / math.sqrt(hadamard_order))
+            cache_k = cache_k.view(-1, layer.tp_k_head_num * layer.qk_head_dim)
 
         if cache_k.dtype != self.dtype:  # fp8, fp4 kv cache
             if k_scale is not None:
