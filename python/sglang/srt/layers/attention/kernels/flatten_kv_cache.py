@@ -12,6 +12,7 @@ Key benefits:
 - Combines scatter-gather + dequantization in one kernel
 """
 
+import math
 from typing import Literal, Tuple
 
 import torch
@@ -19,6 +20,24 @@ import triton
 import triton.language as tl
 
 # Removed _dequant_int4 - INT4 unpacking is now done inline following decode_attention.py logic
+
+
+@triton.jit
+def _fwht_last_dim_batch(x, D: tl.constexpr, LOG: tl.constexpr, BLOCK_H: tl.constexpr):
+    """Blocked FWHT on the last dimension of x [BLOCK_H, D] (decode_attention int4 Q)."""
+    i = tl.arange(0, D)
+    for s in tl.static_range(0, LOG):
+        stride = 1 << s
+        partner = i ^ stride
+        lo = tl.minimum(i, partner)
+        hi = tl.maximum(i, partner)
+        lo_b = tl.broadcast_to(lo[None, :], [BLOCK_H, D])
+        hi_b = tl.broadcast_to(hi[None, :], [BLOCK_H, D])
+        ii = tl.broadcast_to(i[None, :], [BLOCK_H, D])
+        u0 = tl.gather(x, lo_b, 1)
+        v0 = tl.gather(x, hi_b, 1)
+        x = tl.where(ii == lo_b, u0 + v0, u0 - v0)
+    return x
 
 
 @triton.jit
@@ -67,6 +86,12 @@ def _flatten_kv_cache_quant_sglang(
     BLOCK_SIZE: tl.constexpr,  # Number of tokens to process per kernel block
     BLOCK_DK: tl.constexpr,
     BLOCK_DV: tl.constexpr,
+    FUSE_K_HADAMARD: tl.constexpr,
+    FUSE_V_HADAMARD: tl.constexpr,
+    HADAMARD_LOG: tl.constexpr,
+    HADAMARD_PRE_SCALE: tl.constexpr,
+    K_FWHT_DIM: tl.constexpr,
+    V_FWHT_DIM: tl.constexpr,
 ):
     """
     Flatten slot-based KV cache with on-demand dequantization for SGLang.
@@ -163,11 +188,49 @@ def _flatten_kv_cache_quant_sglang(
         # Unpack lower 4 bits (first half of dimension)
         # kc_packed shape: [BLOCK_SIZE, BLOCK_DK_PACKED]
         k_lower = ((kc_packed & 0x0F).to(tl.float32) - kz[:, None]) * ks[:, None]
-        k_lower = k_lower.to(ko_ptr.dtype.element_ty)
 
         # Unpack upper 4 bits (second half of dimension)
         k_upper = (((kc_packed >> 4) & 0x0F).to(tl.float32) - kz[:, None]) * ks[:, None]
-        k_upper = k_upper.to(ko_ptr.dtype.element_ty)
+
+        if FUSE_K_HADAMARD:
+            # Full head [BLOCK_SIZE, BLOCK_DK] = [lower | upper] along dim (same layout as tl.cat on rows).
+            idx_full = tl.broadcast_to(tl.arange(0, BLOCK_DK)[None, :], [BLOCK_SIZE, BLOCK_DK])
+            in_lo = idx_full < BLOCK_DK_PACKED
+            in_hi = (idx_full >= BLOCK_DK_PACKED) & (idx_full < BLOCK_DK)
+            safe_lo = tl.where(in_lo, idx_full, 0)
+            safe_hi = tl.where(in_hi, idx_full - BLOCK_DK_PACKED, 0)
+            v_lo = tl.gather(k_lower, safe_lo, 1)
+            v_hi = tl.gather(k_upper, safe_hi, 1)
+            k_fp = tl.where(in_lo, v_lo, 0.0) + tl.where(in_hi, v_hi, 0.0)
+            c = idx_full
+            k_w = tl.where(c < K_FWHT_DIM, k_fp * HADAMARD_PRE_SCALE, k_fp)
+            x_sub = tl.gather(
+                k_w,
+                tl.broadcast_to(tl.arange(0, K_FWHT_DIM)[None, :], [BLOCK_SIZE, K_FWHT_DIM]),
+                1,
+            )
+            x_sub = _fwht_last_dim_batch(x_sub, K_FWHT_DIM, HADAMARD_LOG, BLOCK_SIZE)
+            safe_c = tl.where(c < K_FWHT_DIM, c, 0)
+            x_g = tl.gather(
+                x_sub,
+                tl.broadcast_to(safe_c, [BLOCK_SIZE, BLOCK_DK]),
+                1,
+            )
+            k_main = tl.where(c < K_FWHT_DIM, x_g, k_fp).to(ko_ptr.dtype.element_ty)
+            k_lower_out = tl.gather(
+                k_main,
+                tl.broadcast_to(offs_dk[None, :], [BLOCK_SIZE, BLOCK_DK_PACKED]),
+                1,
+            )
+            idx_u = BLOCK_DK_PACKED + offs_dk
+            k_upper_out = tl.gather(
+                k_main,
+                tl.broadcast_to(idx_u[None, :], [BLOCK_SIZE, BLOCK_DK_PACKED]),
+                1,
+            )
+        else:
+            k_lower_out = k_lower.to(ko_ptr.dtype.element_ty)
+            k_upper_out = k_upper.to(ko_ptr.dtype.element_ty)
 
         # For storing: offs_dk now has correct size (BLOCK_DK_PACKED)
         # Store lower half to [0, HEAD_DIM_K//2)
@@ -178,7 +241,9 @@ def _flatten_kv_cache_quant_sglang(
             + offs_dk[None, :] * stride_kod
         )
         tl.store(
-            ko_ptrs_lower, k_lower, mask=mask_tok[:, None] & mask_dk_packed[None, :]
+            ko_ptrs_lower,
+            k_lower_out,
+            mask=mask_tok[:, None] & mask_dk_packed[None, :],
         )
 
         # Store upper half to [HEAD_DIM_K//2, HEAD_DIM_K)
@@ -190,7 +255,9 @@ def _flatten_kv_cache_quant_sglang(
             + out_positions[:, None] * stride_kos
             + offs_dk_upper[None, :] * stride_kod
         )
-        tl.store(ko_ptrs_upper, k_upper, mask=mask_tok[:, None] & mask_dk_upper)
+        tl.store(
+            ko_ptrs_upper, k_upper_out, mask=mask_tok[:, None] & mask_dk_upper
+        )
     else:
         # INT8: Standard loading and dequantization
         kc_ptrs = (
@@ -238,11 +305,48 @@ def _flatten_kv_cache_quant_sglang(
         # Unpack lower 4 bits (first half of dimension)
         # vc_packed shape: [BLOCK_SIZE, BLOCK_DV_PACKED]
         v_lower = ((vc_packed & 0x0F).to(tl.float32) - vz[:, None]) * vs[:, None]
-        v_lower = v_lower.to(vo_ptr.dtype.element_ty)
 
         # Unpack upper 4 bits (second half of dimension)
         v_upper = (((vc_packed >> 4) & 0x0F).to(tl.float32) - vz[:, None]) * vs[:, None]
-        v_upper = v_upper.to(vo_ptr.dtype.element_ty)
+
+        if FUSE_V_HADAMARD:
+            idx_v = tl.broadcast_to(tl.arange(0, BLOCK_DV)[None, :], [BLOCK_SIZE, BLOCK_DV])
+            in_vlo = idx_v < BLOCK_DV_PACKED
+            in_vhi = (idx_v >= BLOCK_DV_PACKED) & (idx_v < BLOCK_DV)
+            s_vlo = tl.where(in_vlo, idx_v, 0)
+            s_vhi = tl.where(in_vhi, idx_v - BLOCK_DV_PACKED, 0)
+            vv_lo = tl.gather(v_lower, s_vlo, 1)
+            vv_hi = tl.gather(v_upper, s_vhi, 1)
+            v_fp = tl.where(in_vlo, vv_lo, 0.0) + tl.where(in_vhi, vv_hi, 0.0)
+            c_v = idx_v
+            v_w = tl.where(c_v < V_FWHT_DIM, v_fp * HADAMARD_PRE_SCALE, v_fp)
+            v_sub = tl.gather(
+                v_w,
+                tl.broadcast_to(tl.arange(0, V_FWHT_DIM)[None, :], [BLOCK_SIZE, V_FWHT_DIM]),
+                1,
+            )
+            v_sub = _fwht_last_dim_batch(v_sub, V_FWHT_DIM, HADAMARD_LOG, BLOCK_SIZE)
+            safe_cv = tl.where(c_v < V_FWHT_DIM, c_v, 0)
+            v_g = tl.gather(
+                v_sub,
+                tl.broadcast_to(safe_cv, [BLOCK_SIZE, BLOCK_DV]),
+                1,
+            )
+            v_main = tl.where(c_v < V_FWHT_DIM, v_g, v_fp).to(vo_ptr.dtype.element_ty)
+            v_lower_out = tl.gather(
+                v_main,
+                tl.broadcast_to(offs_dv[None, :], [BLOCK_SIZE, BLOCK_DV_PACKED]),
+                1,
+            )
+            idx_vu = BLOCK_DV_PACKED + offs_dv
+            v_upper_out = tl.gather(
+                v_main,
+                tl.broadcast_to(idx_vu[None, :], [BLOCK_SIZE, BLOCK_DV_PACKED]),
+                1,
+            )
+        else:
+            v_lower_out = v_lower.to(vo_ptr.dtype.element_ty)
+            v_upper_out = v_upper.to(vo_ptr.dtype.element_ty)
 
         # For storing: offs_dv now has correct size (BLOCK_DV_PACKED)
         # Store lower half to [0, HEAD_DIM_V//2)
@@ -253,7 +357,9 @@ def _flatten_kv_cache_quant_sglang(
             + offs_dv[None, :] * stride_vod
         )
         tl.store(
-            vo_ptrs_lower, v_lower, mask=mask_tok[:, None] & mask_dv_packed[None, :]
+            vo_ptrs_lower,
+            v_lower_out,
+            mask=mask_tok[:, None] & mask_dv_packed[None, :],
         )
 
         # Store upper half to [HEAD_DIM_V//2, HEAD_DIM_V)
@@ -265,7 +371,9 @@ def _flatten_kv_cache_quant_sglang(
             + out_positions[:, None] * stride_vos
             + offs_dv_upper[None, :] * stride_vod
         )
-        tl.store(vo_ptrs_upper, v_upper, mask=mask_tok[:, None] & mask_dv_upper)
+        tl.store(
+            vo_ptrs_upper, v_upper_out, mask=mask_tok[:, None] & mask_dv_upper
+        )
     else:
         # INT8: Standard loading and dequantization
         vc_ptrs = (
@@ -307,6 +415,9 @@ def flatten_kv_cache_sglang(
     output_dtype: torch.dtype,
     max_seq_len_k: int,
     out_size: int,
+    fuse_k_hadamard: bool = False,
+    fuse_v_hadamard: bool = False,
+    hadamard_order: int = 16,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Flatten paged KV cache with on-demand dequantization for SGLang.
@@ -327,6 +438,10 @@ def flatten_kv_cache_sglang(
         output_dtype: Output dtype (typically fp16 or bf16)
         max_seq_len_k: Maximum sequence length in batch (must be provided to avoid D2H copy)
         out_size: Total number of output tokens (must be provided to avoid D2H copy)
+        fuse_k_hadamard: If True (int4 only), apply segmented FWHT on K after dequant,
+            matching ``hadamard_transform(k / sqrt(order))`` on ``view(..., -1, order)``.
+        fuse_v_hadamard: If True (int4 only), same FWHT on V after dequant.
+        hadamard_order: Power-of-two block size for FWHT; used when either fuse flag is set.
 
     Returns:
         Tuple of (flattened_k, flattened_v)
@@ -350,6 +465,28 @@ def flatten_kv_cache_sglang(
     assert (
         v_cache.size(1) == num_heads
     ), f"v_cache heads {v_cache.size(1)} != num_heads {num_heads}"
+
+    if fuse_k_hadamard or fuse_v_hadamard:
+        if quant_policy != 4:
+            raise ValueError(
+                "fuse_k_hadamard / fuse_v_hadamard are only supported for int4 KV (quant_policy=4)"
+            )
+        from sglang.QuantKernel.fused_hadamard_int4_kv import (
+            validate_hadamard_order_for_kv_fuse,
+        )
+
+        if fuse_k_hadamard:
+            validate_hadamard_order_for_kv_fuse(hadamard_order, head_dim_k)
+        if fuse_v_hadamard:
+            validate_hadamard_order_for_kv_fuse(hadamard_order, head_dim_v)
+
+    fuse_any = fuse_k_hadamard or fuse_v_hadamard
+    fuse_k = 1 if fuse_k_hadamard else 0
+    fuse_v = 1 if fuse_v_hadamard else 0
+    hadamard_log = int(math.log2(hadamard_order)) if fuse_any else 0
+    hadamard_pre_scale = (1.0 / math.sqrt(float(hadamard_order))) if fuse_any else 1.0
+    k_fwht_dim = head_dim_k
+    v_fwht_dim = head_dim_v
 
     # Page table contains page indices, each page holds page_size tokens
     # So max_slots_per_seq is the number of pages, not tokens
@@ -436,6 +573,12 @@ def flatten_kv_cache_sglang(
         BLOCK_SIZE=BLOCK_SIZE,
         BLOCK_DK=BLOCK_DK,
         BLOCK_DV=BLOCK_DV,
+        FUSE_K_HADAMARD=fuse_k,
+        FUSE_V_HADAMARD=fuse_v,
+        HADAMARD_LOG=hadamard_log,
+        HADAMARD_PRE_SCALE=hadamard_pre_scale,
+        K_FWHT_DIM=k_fwht_dim,
+        V_FWHT_DIM=v_fwht_dim,
     )
 
     return k_flattened, v_flattened

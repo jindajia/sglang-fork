@@ -32,6 +32,12 @@ from sgl_kernel.flash_attn import flash_attn_with_kvcache as flash_attn_with_kvc
 _hadamard_enabled = 1 if os.environ.get("HADAMARD", "0") in ("1", "true", "True") else 0
 _rotate_v_enabled = 1 if os.environ.get("ROTATE_V", "0") in ("1", "true", "True") else 0
 _hadamard_order = int(os.environ.get("HADAMARD_ORDER", "16"))
+# Same env as memory_pool / triton decode: fused FWHT inside int4 KV paths vs separate CUDA Hadamard.
+_fuse_hadamard_int4_kv = os.environ.get("SGLANG_FUSE_HADAMARD_INT4_KV", "1").lower() in (
+    "1",
+    "true",
+    "yes",
+)
 
 flash_attn_varlen_func = flash_attn_varlen_func_fa3
 flash_attn_with_kvcache = flash_attn_with_kvcache_fa3
@@ -889,6 +895,11 @@ class FlashAttentionBackend(AttentionBackend):
                 )
 
                 out_size = metadata.kv_flatten_size
+                use_flatten_hadamard_fuse = (
+                    self.kv_cache_dtype_str == "int4"
+                    and _hadamard_enabled
+                    and _fuse_hadamard_int4_kv
+                )
                 flatten_k, flatten_v = flatten_kv_cache_sglang(
                     k_cache=kv_data["k_buffer"],
                     v_cache=kv_data["v_buffer"],
@@ -905,8 +916,15 @@ class FlashAttentionBackend(AttentionBackend):
                     output_dtype=q.dtype,
                     max_seq_len_k=max_seq_len_k,
                     out_size=out_size,
+                    fuse_k_hadamard=use_flatten_hadamard_fuse,
+                    fuse_v_hadamard=use_flatten_hadamard_fuse and bool(_rotate_v_enabled),
+                    hadamard_order=_hadamard_order,
                 )
-                if self.kv_cache_dtype_str == "int4" and _hadamard_enabled:
+                if (
+                    self.kv_cache_dtype_str == "int4"
+                    and _hadamard_enabled
+                    and not _fuse_hadamard_int4_kv
+                ):
                     q = q.contiguous().view(-1, layer.tp_q_head_num, layer.head_dim)
                     hadamard_order = _hadamard_order
                     orig_shape = q.shape  # (a, b, c, d)
@@ -936,6 +954,7 @@ class FlashAttentionBackend(AttentionBackend):
                     self.kv_cache_dtype_str == "int4"
                     and _hadamard_enabled
                     and _rotate_v_enabled
+                    and not _fuse_hadamard_int4_kv
                 ):
                     hadamard_order = _hadamard_order
                     orig_shape = result.shape  # (a, b, c, d)
