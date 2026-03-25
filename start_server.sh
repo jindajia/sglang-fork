@@ -85,7 +85,8 @@ CONDA_ENV_NAME="sglang_env"
 CONDA_ENV_DIR="$CONDA_BASE/envs/$CONDA_ENV_NAME"
 PYTHON="$CONDA_ENV_DIR/bin/python3"
 
-export TRITON_CACHE_DIR="/scratch/jisenli2/.triton/cache"
+export TRITON_CACHE_DIR="/dev/shm/triton_cache_jisenli2"
+export FLASHINFER_CACHE_DIR="/data/$USER/.cache/flashinfer"
 export TMPDIR="/data/jisenli2/tmp"
 mkdir -p "$TMPDIR"
 
@@ -220,6 +221,7 @@ start_single_server() {
     N_CLUSTERS=$n_clusters \
     SGLANG_KV_CENTROIDS_PATH="$centroids_path" \
     CUDA_VISIBLE_DEVICES=$gpu_devices \
+    SGLANG_DISABLE_FLASHINFER_TRTLLM_AR_FUSION=1 \
     PATH="$(dirname "$PYTHON"):$PATH" \
     LIBRARY_PATH="/usr/local/cuda/targets/x86_64-linux/lib${LIBRARY_PATH:+:$LIBRARY_PATH}" \
     LD_LIBRARY_PATH="/usr/local/cuda/targets/x86_64-linux/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
