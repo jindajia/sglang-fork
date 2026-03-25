@@ -17,6 +17,10 @@
 
 set -eo pipefail
 
+# Redirect TMPDIR away from /tmp (system disk may fill up with other users' torchinductor caches)
+export TMPDIR="/data/${USER}/tmp"
+mkdir -p "$TMPDIR"
+
 cleanup() {
     trap '' INT TERM   # prevent recursive trap invocation
     echo ""
@@ -31,8 +35,8 @@ trap cleanup INT TERM
 # =============================================================================
 BATCH_SIZES=(1 8 16 32)
 INPUT_LENS=(8192 16384 32768)
-MAX_NEW_TOKENS=1024
-NUM_EXAMPLES=96
+MAX_NEW_TOKENS=10
+# NUM_EXAMPLES equals batch size for each run
 
 # =============================================================================
 # Model Configs
@@ -62,8 +66,8 @@ MODEL_CONFIGS=(
     # "QUANT |1|1|64 |INT4|Qwen/Qwen3-4B-Thinking-2507|0|5|1|1|1"
     "QUANT |1|0|128|INT4|Qwen/Qwen3-4B-Thinking-2507|0|4|1|1|1"
     # "QUANT |1|1|128|INT4|Qwen/Qwen3-4B-Thinking-2507|0|7|1|1|1"
-    "QUANT |1|0|512 |INT4|Qwen/Qwen3-4B-Thinking-2507|0|5|1|1|1"
-    "QUANT |1|0|1024 |INT4|Qwen/Qwen3-4B-Thinking-2507|0|6|1|1|1"
+    # "QUANT |1|0|512 |INT4|Qwen/Qwen3-4B-Thinking-2507|0|5|1|1|1"
+    # "QUANT |1|0|1024 |INT4|Qwen/Qwen3-4B-Thinking-2507|0|6|1|1|1"
     # ---- KMEANS examples (uncomment and fill n_clusters as needed) -----------
     # "KMEANS|1|0|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|2048|0|1|1|1"
 )
@@ -322,14 +326,11 @@ benchmark_single_model() {
     fi
 
     local kv_cache_dtype
-    if [[ "$mode" == "BASE" ]]; then
-        kv_cache_dtype="auto"
-    else
-        case "$kv_dtype" in
-            BF16) kv_cache_dtype="auto" ;;
-            INT4) kv_cache_dtype="int4" ;;
-        esac
-    fi
+    case "$kv_dtype" in
+        BF16) kv_cache_dtype="auto" ;;
+        INT4) kv_cache_dtype="int4" ;;
+        *)    kv_cache_dtype="auto" ;;
+    esac
 
     local kv_dtype_lower="${kv_dtype,,}"
     local rot_suffix
@@ -360,7 +361,7 @@ benchmark_single_model() {
     [[ "$mode" == "KMEANS" ]] && log_message "N_CLUSTERS=$n_clusters"
     log_message "Batch sizes:  ${BATCH_SIZES[*]}"
     log_message "Input lens:   ${INPUT_LENS[*]}"
-    log_message "Max new tok:  $MAX_NEW_TOKENS  num_examples: $NUM_EXAMPLES"
+    log_message "Max new tok:  $MAX_NEW_TOKENS  num_examples: equals batch size"
     log_message "Results dir:  $result_dir"
     log_message "=========================================="
 
@@ -397,10 +398,6 @@ benchmark_single_model() {
     LD_LIBRARY_PATH="/usr/local/cuda/targets/x86_64-linux/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
     "$PYTHON" -m sglang.launch_server \
         --model-path "$model_name" \
-        --max-running-requests 64 \
-        --max-queued-requests 256 \
-        --page-size 128 \
-        --chunked-prefill-size 8192 \
         --mem-fraction-static "$mem_fraction" \
         --kv-cache-dtype "$kv_cache_dtype" \
         --prefill-attention-backend fa3 \
@@ -415,9 +412,17 @@ benchmark_single_model() {
         --log-requests \
         --log-requests-level 0 \
         --enable-request-time-stats-logging \
+        --disable-radix-cache \
+        --chunked-prefill-size 32768 \
         > "$server_log" 2>&1 &
     local server_pid=$!
     log_message "Server started (PID: $server_pid)"
+    # --max-prefill-tokens 262144 \
+    # --chunked-prefill-size -1 \
+    # --max-running-requests 64 \
+    #     --max-queued-requests 256 \
+    #     --page-size 128 \
+    #     --chunked-prefill-size 8192 \
 
     if ! wait_for_server "$server_port" "$server_pid" "SGLang server"; then
         tail -50 "$server_log" | tee -a "$BATCH_LOG_FILE"
@@ -473,7 +478,8 @@ benchmark_single_model() {
             local log_line_before
             log_line_before=$(wc -l < "$server_log" 2>/dev/null || echo 0)
 
-            log_message "  BS=${bs}  input=${label_in}  output=${MAX_NEW_TOKENS}tok  examples=${NUM_EXAMPLES}"
+            local num_examples=$bs  # num_examples equals batch size
+            log_message "  BS=${bs}  input=${label_in}  output=${MAX_NEW_TOKENS}tok  examples=${num_examples}"
             set +e
             cd "$SCRIPT_DIR"
             CUDA_VISIBLE_DEVICES="" \
@@ -486,12 +492,12 @@ benchmark_single_model() {
                 --dataset_type=synthetic \
                 --synthetic_input_length="$input_len" \
                 --synthetic_output_length="$MAX_NEW_TOKENS" \
-                        --stream=true \
+                --stream=true \
                 --temperature=1.0 \
                 --top_p=0.7 \
                 --num_gpus="$tp_size" \
                 --concurrency="$bs" \
-                --num_examples="$NUM_EXAMPLES" \
+                --num_examples="$num_examples" \
                 --chat=false \
                 2>&1 | tee -a "$BATCH_LOG_FILE"
             local eval_exit=${PIPESTATUS[0]}
@@ -555,7 +561,7 @@ echo "[$(date '+%Y-%m-%d %H:%M:%S')] Configs:       ${#MODEL_CONFIGS[@]} entry(s
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Batch sizes:   ${BATCH_SIZES[*]}"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Input lens:    ${INPUT_LENS[*]}"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Max new tokens: $MAX_NEW_TOKENS"
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] Num examples:  $NUM_EXAMPLES"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Num examples:  equals batch size"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] GPU free threshold: ${GPU_FREE_MEM_MB} MB"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] KV dump base:  ${KV_DUMP_BASE}"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] =========================================="
