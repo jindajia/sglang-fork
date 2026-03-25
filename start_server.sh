@@ -53,8 +53,8 @@ MODEL_CONFIGS=(
     # GLM-4.7-FP8  (TP=8, all 8 GPUs; all configs sequential)
     # ==========================================================================
     # "BASE  |0|0|0  |FP8 |zai-org/GLM-4.7-FP8             |0       |0,1,2,3,4,5,6,7 |8 |1 |1"
-    # "BASE  |0|0|0  |INT4|zai-org/GLM-4.7-FP8             |0       |0,1,2,3,4,5,6,7 |8 |1 |1"
-    "QUANT |1|0|16 |INT4|zai-org/GLM-4.7-FP8             |0       |0,1,2,3,4,5,6,7 |8 |1 |1"
+    "BASE  |0|0|0  |INT4|zai-org/GLM-4.7-FP8             |0       |0,1,2,3,4,5,6,7 |8 |1 |1"
+    # "QUANT |1|0|16 |INT4|zai-org/GLM-4.7-FP8             |0       |0,1,2,3,4,5,6,7 |8 |1 |1"
     # "QUANT |1|1|16 |INT4|zai-org/GLM-4.7-FP8             |0       |0,1,2,3,4,5,6,7 |8 |1 |1"
     # "QUANT |1|0|64 |INT4|zai-org/GLM-4.7-FP8             |0       |0,1,2,3,4,5,6,7 |8 |1 |1"
     # "QUANT |1|0|16 |INT4|zai-org/GLM-4.7-FP8             |0       |0,1,2,3,4,5,6,7 |8 |1 |1"
@@ -86,6 +86,8 @@ CONDA_ENV_DIR="$CONDA_BASE/envs/$CONDA_ENV_NAME"
 PYTHON="$CONDA_ENV_DIR/bin/python3"
 
 export TRITON_CACHE_DIR="/scratch/jisenli2/.triton/cache"
+export TMPDIR="/data/jisenli2/tmp"
+mkdir -p "$TMPDIR"
 
 GPU_FREE_MEM_MB="${GPU_FREE_MEM_MB:-500}"
 GPU_POLL_INTERVAL="${GPU_POLL_INTERVAL:-240}"
@@ -241,6 +243,7 @@ start_single_server() {
         --host 0.0.0.0 \
         --port "$server_port" \
         --trust-remote-code \
+        --disable-cuda-graph \
         > "$server_log" 2>&1 &
     local server_pid=$!
 
