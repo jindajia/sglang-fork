@@ -58,9 +58,9 @@ NUM_EXAMPLES=64
 #
 MODEL_CONFIGS=(
     # ---- Qwen/Qwen3-8B  TP=2 ------------------------------------------------
-    "BASE  |0|0|0  |BF16|Qwen/Qwen3-8B|0|0,1|2|1|1"
-    "BASE  |0|0|0  |INT4|Qwen/Qwen3-8B|0|2,3|2|1|1"
-    "QUANT |1|0|128|INT4|Qwen/Qwen3-8B|0|4,5|2|1|1"
+    # "BASE  |0|0|0  |BF16|Qwen/Qwen3-8B|0|0,1|2|1|1"
+    "BASE  |0|0|0  |INT4|Qwen/Qwen3-8B|0|0,1|2|1|1"
+    "QUANT |1|0|128|INT4|Qwen/Qwen3-8B|0|2,3|2|1|1"
     # ---- Qwen/Qwen3-4B-Thinking-2507 ----------------------------------------
     # "BASE  |0|0|0  |BF16|Qwen/Qwen3-4B-Thinking-2507|0|0|1|1|1"
     # "BASE  |0|0|0  |INT4|Qwen/Qwen3-4B-Thinking-2507|0|1|1|1|1"
@@ -89,7 +89,7 @@ declare -A MODEL_NUM_LAYERS=(
 # =============================================================================
 # Server & Path Config
 # =============================================================================
-BASE_PORT=30200
+BASE_PORT=30900
 
 # Base directory for KV dump files and centroids (KMEANS mode only)
 KV_DUMP_BASE="${KV_DUMP_BASE:-/data/$USER/kv-cache}"

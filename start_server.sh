@@ -53,8 +53,8 @@ MODEL_CONFIGS=(
     # GLM-4.7-FP8  (TP=8, all 8 GPUs; all configs sequential)
     # ==========================================================================
     # "BASE  |0|0|0  |FP8 |zai-org/GLM-4.7-FP8             |0       |0,1,2,3,4,5,6,7 |8 |1 |1"
-    # "BASE  |0|0|0  |INT4|zai-org/GLM-4.7-FP8             |0       |0,1,2,3,4,5,6,7 |8 |1 |1"
-    "QUANT |1|0|16 |INT4|zai-org/GLM-4.7-FP8             |0       |0,1,2,3,4,5,6,7 |8 |1 |1"
+    "BASE  |0|0|0  |INT4|zai-org/GLM-4.7-FP8             |0       |0,1,2,3,4,5,6,7 |8 |1 |1"
+    # "QUANT |1|0|16 |INT4|zai-org/GLM-4.7-FP8             |0       |0,1,2,3,4,5,6,7 |8 |1 |1"
     # "QUANT |1|1|16 |INT4|zai-org/GLM-4.7-FP8             |0       |0,1,2,3,4,5,6,7 |8 |1 |1"
     # "QUANT |1|0|64 |INT4|zai-org/GLM-4.7-FP8             |0       |0,1,2,3,4,5,6,7 |8 |1 |1"
     # "QUANT |1|0|16 |INT4|zai-org/GLM-4.7-FP8             |0       |0,1,2,3,4,5,6,7 |8 |1 |1"
@@ -171,14 +171,11 @@ start_single_server() {
     # kv_dtype for BASE only describes the model weight format (e.g. GLM-4.7-FP8).
     # For QUANT/KMEANS: BF16/FP8 → auto, INT4 → int4.
     local kv_cache_dtype
-    if [[ "$mode" == "BASE" ]]; then
-        kv_cache_dtype="auto"
-    else
-        case "$kv_dtype" in
-            BF16|FP8) kv_cache_dtype="auto" ;;
-            INT4)     kv_cache_dtype="int4" ;;
-        esac
-    fi
+    case "$kv_dtype" in
+        BF16) kv_cache_dtype="auto" ;;
+        INT4) kv_cache_dtype="int4" ;;
+        *)    kv_cache_dtype="auto" ;;
+    esac
 
     local kv_dtype_lower="${kv_dtype,,}"
     local rot_suffix
