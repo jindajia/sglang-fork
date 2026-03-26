@@ -53,8 +53,8 @@ MODEL_CONFIGS=(
     # GLM-4.7-FP8  (TP=8, all 8 GPUs; all configs sequential)
     # ==========================================================================
     # "BASE  |0|0|0  |FP8 |zai-org/GLM-4.7-FP8             |0       |0,1,2,3,4,5,6,7 |8 |1 |1"
-    "BASE  |0|0|0  |INT4|zai-org/GLM-4.7-FP8             |0       |0,1,2,3,4,5,6,7 |8 |1 |1"
-    # "QUANT |1|0|16 |INT4|zai-org/GLM-4.7-FP8             |0       |0,1,2,3,4,5,6,7 |8 |1 |1"
+    # "BASE  |0|0|0  |INT4|zai-org/GLM-4.7-FP8             |0       |0,1,2,3,4,5,6,7 |8 |1 |1"
+    "QUANT |1|0|16 |INT4|zai-org/GLM-4.7-FP8             |0       |0,1,2,3,4,5,6,7 |8 |1 |1"
     # "QUANT |1|1|16 |INT4|zai-org/GLM-4.7-FP8             |0       |0,1,2,3,4,5,6,7 |8 |1 |1"
     # "QUANT |1|0|64 |INT4|zai-org/GLM-4.7-FP8             |0       |0,1,2,3,4,5,6,7 |8 |1 |1"
     # "QUANT |1|0|16 |INT4|zai-org/GLM-4.7-FP8             |0       |0,1,2,3,4,5,6,7 |8 |1 |1"
@@ -86,8 +86,6 @@ CONDA_ENV_DIR="$CONDA_BASE/envs/$CONDA_ENV_NAME"
 PYTHON="$CONDA_ENV_DIR/bin/python3"
 
 export TRITON_CACHE_DIR="/scratch/jisenli2/.triton/cache"
-export TMPDIR="/data/jisenli2/tmp"
-mkdir -p "$TMPDIR"
 
 GPU_FREE_MEM_MB="${GPU_FREE_MEM_MB:-500}"
 GPU_POLL_INTERVAL="${GPU_POLL_INTERVAL:-240}"
@@ -165,12 +163,18 @@ start_single_server() {
         echo "ERROR: kv_dtype must be BF16, INT4, or FP8, got: '$kv_dtype'"
         return 1
     fi
+    # BASE mode always uses auto (BF16) KV cache regardless of kv_dtype.
+    # kv_dtype for BASE only describes the model weight format (e.g. GLM-4.7-FP8).
+    # For QUANT/KMEANS: BF16/FP8 → auto, INT4 → int4.
     local kv_cache_dtype
-    case "$kv_dtype" in
-        BF16) kv_cache_dtype="auto" ;;
-        INT4) kv_cache_dtype="int4" ;;
-        *)    kv_cache_dtype="auto" ;;
-    esac
+    if [[ "$mode" == "BASE" ]]; then
+        kv_cache_dtype="auto"
+    else
+        case "$kv_dtype" in
+            BF16|FP8) kv_cache_dtype="auto" ;;
+            INT4)     kv_cache_dtype="int4" ;;
+        esac
+    fi
 
     local kv_dtype_lower="${kv_dtype,,}"
     local rot_suffix
@@ -243,7 +247,7 @@ start_single_server() {
         --host 0.0.0.0 \
         --port "$server_port" \
         --trust-remote-code \
-        --disable-cuda-graph \
+        --disable-custom-all-reduce \
         > "$server_log" 2>&1 &
     local server_pid=$!
 

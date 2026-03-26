@@ -279,6 +279,3 @@ eval_logs/
 datasets/
 server_logs/
 swe_bench_verified_results/
-throughput_results/
-throughput_logs/
-throughput_summary.md

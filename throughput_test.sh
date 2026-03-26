@@ -33,9 +33,10 @@ trap cleanup INT TERM
 # =============================================================================
 # Throughput Test Parameters
 # =============================================================================
-BATCH_SIZES=(1 8 16 32)
-INPUT_LENS=(8192 16384 32768)
-MAX_NEW_TOKENS=10
+BATCH_SIZES=(1 16)
+INPUT_LENS=(8192)
+OUTPUT_LENS=(4096)
+# OUTPUT_LENS=(1024 2048 4096)
 # NUM_EXAMPLES equals batch size for each run
 
 # =============================================================================
@@ -56,15 +57,18 @@ MAX_NEW_TOKENS=10
 #   eval_dp       : data parallel size
 #
 MODEL_CONFIGS=(
+    # ---- Qwen/Qwen3-8B  TP=2 ------------------------------------------------
+    "BASE  |0|0|0  |BF16|Qwen/Qwen3-8B|0|0,1|2|1|1"
+    "BASE  |0|0|0  |INT4|Qwen/Qwen3-8B|0|2,3|2|1|1"
+    "QUANT |1|0|128|INT4|Qwen/Qwen3-8B|0|4,5|2|1|1"
     # ---- Qwen/Qwen3-4B-Thinking-2507 ----------------------------------------
-    # Baseline BF16 KV
-    "BASE  |0|0|0  |BF16|Qwen/Qwen3-4B-Thinking-2507|0|0|1|1|1"
-    "BASE  |0|0|0  |INT4|Qwen/Qwen3-4B-Thinking-2507|0|1|1|1|1"
-    "QUANT |1|0|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|0|2|1|1|1"
+    # "BASE  |0|0|0  |BF16|Qwen/Qwen3-4B-Thinking-2507|0|0|1|1|1"
+    # "BASE  |0|0|0  |INT4|Qwen/Qwen3-4B-Thinking-2507|0|1|1|1|1"
+    # "QUANT |1|0|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|0|2|1|1|1"
     # "QUANT |1|1|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|0|3|1|1|1"
-    "QUANT |1|0|64 |INT4|Qwen/Qwen3-4B-Thinking-2507|0|3|1|1|1"
+    # "QUANT |1|0|64 |INT4|Qwen/Qwen3-4B-Thinking-2507|0|3|1|1|1"
     # "QUANT |1|1|64 |INT4|Qwen/Qwen3-4B-Thinking-2507|0|5|1|1|1"
-    "QUANT |1|0|128|INT4|Qwen/Qwen3-4B-Thinking-2507|0|4|1|1|1"
+    # "QUANT |1|0|128|INT4|Qwen/Qwen3-4B-Thinking-2507|0|4|1|1|1"
     # "QUANT |1|1|128|INT4|Qwen/Qwen3-4B-Thinking-2507|0|7|1|1|1"
     # "QUANT |1|0|512 |INT4|Qwen/Qwen3-4B-Thinking-2507|0|5|1|1|1"
     # "QUANT |1|0|1024 |INT4|Qwen/Qwen3-4B-Thinking-2507|0|6|1|1|1"
@@ -192,6 +196,7 @@ wait_for_gpus_free() {
 
 # Convert token count to short label: 8192 → in8k, 16384 → in16k, 32768 → in32k
 input_len_label() { echo "in$((${1} / 1024))k"; }
+output_len_label() { echo "out$((${1} / 1024))k"; }
 
 # =============================================================================
 # extract_per_request_stats
@@ -361,7 +366,7 @@ benchmark_single_model() {
     [[ "$mode" == "KMEANS" ]] && log_message "N_CLUSTERS=$n_clusters"
     log_message "Batch sizes:  ${BATCH_SIZES[*]}"
     log_message "Input lens:   ${INPUT_LENS[*]}"
-    log_message "Max new tok:  $MAX_NEW_TOKENS  num_examples: equals batch size"
+    log_message "Output lens:  ${OUTPUT_LENS[*]}  num_examples: equals batch size"
     log_message "Results dir:  $result_dir"
     log_message "=========================================="
 
@@ -464,56 +469,59 @@ benchmark_single_model() {
     local overall_exit=0
     for bs in "${BATCH_SIZES[@]}"; do
         for input_len in "${INPUT_LENS[@]}"; do
-            local label_in
-            label_in=$(input_len_label "$input_len")
-            local csv_path="${result_dir}/bs${bs}_${label_in}.csv"
+            for output_len in "${OUTPUT_LENS[@]}"; do
+                local label_in label_out
+                label_in=$(input_len_label "$input_len")
+                label_out=$(output_len_label "$output_len")
+                local csv_path="${result_dir}/bs${bs}_${label_in}_${label_out}.csv"
 
-            # Skip if result already exists
-            if [ -f "$csv_path" ]; then
-                log_message "  Skip BS=${bs} ${label_in}: $csv_path already exists"
-                continue
-            fi
+                # Skip if result already exists
+                if [ -f "$csv_path" ]; then
+                    log_message "  Skip BS=${bs} ${label_in} ${label_out}: $csv_path already exists"
+                    continue
+                fi
 
-            # Record server log line count before this run for stats extraction
-            local log_line_before
-            log_line_before=$(wc -l < "$server_log" 2>/dev/null || echo 0)
+                # Record server log line count before this run for stats extraction
+                local log_line_before
+                log_line_before=$(wc -l < "$server_log" 2>/dev/null || echo 0)
 
-            local num_examples=$bs  # num_examples equals batch size
-            log_message "  BS=${bs}  input=${label_in}  output=${MAX_NEW_TOKENS}tok  examples=${num_examples}"
-            set +e
-            cd "$SCRIPT_DIR"
-            CUDA_VISIBLE_DEVICES="" \
-            "$PYTHON" -m tore_speed_eval.eval \
-                --provider=vllm \
-                --base_url="http://localhost:${server_port}/v1" \
-                --api_key="" \
-                --model_name="$model_name" \
-                --evaluation_output_path="$csv_path" \
-                --dataset_type=synthetic \
-                --synthetic_input_length="$input_len" \
-                --synthetic_output_length="$MAX_NEW_TOKENS" \
-                --stream=true \
-                --temperature=1.0 \
-                --top_p=0.7 \
-                --num_gpus="$tp_size" \
-                --concurrency="$bs" \
-                --num_examples="$num_examples" \
-                --chat=false \
-                2>&1 | tee -a "$BATCH_LOG_FILE"
-            local eval_exit=${PIPESTATUS[0]}
-            set -e
+                local num_examples=$(( bs > 4 ? bs : 4 ))  # at least 4 examples for stable stats
+                log_message "  BS=${bs}  input=${label_in}  output=${label_out}  examples=${num_examples}"
+                set +e
+                cd "$SCRIPT_DIR"
+                CUDA_VISIBLE_DEVICES="" \
+                "$PYTHON" -m tore_speed_eval.eval \
+                    --provider=vllm \
+                    --base_url="http://localhost:${server_port}/v1" \
+                    --api_key="" \
+                    --model_name="$model_name" \
+                    --evaluation_output_path="$csv_path" \
+                    --dataset_type=synthetic \
+                    --synthetic_input_length="$input_len" \
+                    --synthetic_output_length="$output_len" \
+                    --stream=true \
+                    --temperature=1.0 \
+                    --top_p=0.7 \
+                    --num_gpus="$tp_size" \
+                    --concurrency="$bs" \
+                    --num_examples="$num_examples" \
+                    --chat=false \
+                    2>&1 | tee -a "$BATCH_LOG_FILE"
+                local eval_exit=${PIPESTATUS[0]}
+                set -e
 
-            if [ $eval_exit -ne 0 ]; then
-                log_message "  ✗ BS=${bs} ${label_in} failed (exit: $eval_exit)"
-                overall_exit=$eval_exit
-            else
-                log_message "  ✓ BS=${bs} ${label_in} -> $csv_path"
-            fi
+                if [ $eval_exit -ne 0 ]; then
+                    log_message "  ✗ BS=${bs} ${label_in} ${label_out} failed (exit: $eval_exit)"
+                    overall_exit=$eval_exit
+                else
+                    log_message "  ✓ BS=${bs} ${label_in} ${label_out} -> $csv_path"
+                fi
 
-            # Extract per-request TPS / OTPS / TTFT from server log for this run
-            extract_per_request_stats \
-                "$server_log" "$log_line_before" "$rot_suffix" \
-                "$bs" "$label_in" "$stats_log"
+                # Extract per-request TPS / OTPS / TTFT from server log for this run
+                extract_per_request_stats \
+                    "$server_log" "$log_line_before" "$rot_suffix" \
+                    "$bs" "${label_in}_${label_out}" "$stats_log"
+            done
         done
     done
 
@@ -560,7 +568,7 @@ echo "[$(date '+%Y-%m-%d %H:%M:%S')] KV-cache Rotation Throughput Benchmark"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Configs:       ${#MODEL_CONFIGS[@]} entry(s)"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Batch sizes:   ${BATCH_SIZES[*]}"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Input lens:    ${INPUT_LENS[*]}"
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] Max new tokens: $MAX_NEW_TOKENS"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Output lens:   ${OUTPUT_LENS[*]}"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Num examples:  equals batch size"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] GPU free threshold: ${GPU_FREE_MEM_MB} MB"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] KV dump base:  ${KV_DUMP_BASE}"
