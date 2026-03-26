@@ -85,6 +85,7 @@ CONDA_ENV_NAME="sglang_env"
 CONDA_ENV_DIR="$CONDA_BASE/envs/$CONDA_ENV_NAME"
 PYTHON="$CONDA_ENV_DIR/bin/python3"
 
+# export TRITON_CACHE_DIR="/scratch/jisenli2/.triton/cache"
 export TRITON_CACHE_DIR="/dev/shm/triton_cache_jisenli2"
 export FLASHINFER_CACHE_DIR="/data/$USER/.cache/flashinfer"
 export TMPDIR="/data/jisenli2/tmp"
