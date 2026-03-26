@@ -35,9 +35,9 @@ trap cleanup INT TERM
 # =============================================================================
 BATCH_SIZES=(1 16)
 INPUT_LENS=(8192)
-OUTPUT_LENS=(4096)
-# OUTPUT_LENS=(1024 2048 4096)
-# NUM_EXAMPLES equals batch size for each run
+# OUTPUT_LENS=(4096)
+OUTPUT_LENS=(1024 2048)
+NUM_EXAMPLES=64
 
 # =============================================================================
 # Model Configs
@@ -99,7 +99,7 @@ DUMP_TOKENS=20000
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TORE_SPEED_EVAL_DIR="$SCRIPT_DIR/tore-speed-eval"
-RESULTS_DIR="$SCRIPT_DIR/throughput_results"
+RESULTS_DIR="$SCRIPT_DIR/throughput_results_0326"
 LOGS_DIR="$SCRIPT_DIR/throughput_logs"
 
 export HF_HOME=/data/shared/huggingface
@@ -366,7 +366,7 @@ benchmark_single_model() {
     [[ "$mode" == "KMEANS" ]] && log_message "N_CLUSTERS=$n_clusters"
     log_message "Batch sizes:  ${BATCH_SIZES[*]}"
     log_message "Input lens:   ${INPUT_LENS[*]}"
-    log_message "Output lens:  ${OUTPUT_LENS[*]}  num_examples: equals batch size"
+    log_message "Output lens:  ${OUTPUT_LENS[*]}  num_examples: ${NUM_EXAMPLES}"
     log_message "Results dir:  $result_dir"
     log_message "=========================================="
 
@@ -485,7 +485,7 @@ benchmark_single_model() {
                 local log_line_before
                 log_line_before=$(wc -l < "$server_log" 2>/dev/null || echo 0)
 
-                local num_examples=$(( bs > 4 ? bs : 4 ))  # at least 4 examples for stable stats
+                local num_examples=$NUM_EXAMPLES
                 log_message "  BS=${bs}  input=${label_in}  output=${label_out}  examples=${num_examples}"
                 set +e
                 cd "$SCRIPT_DIR"
