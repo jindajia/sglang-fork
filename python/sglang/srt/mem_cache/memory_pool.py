@@ -69,6 +69,10 @@ from sglang.srt.utils import (
 )
 from sglang.srt.utils.custom_op import register_custom_op
 from sglang.srt.utils.torch_memory_saver_adapter import TorchMemorySaverAdapter
+from sglang.QuantKernel.fused_hadamard_int4_kv import (
+    quantized_set_kv_int4_hadamard_fused_triton,
+    validate_hadamard_order_for_kv_fuse,
+)
 
 store_cache = register_custom_op(store_cache, mutates_args=["k_cache", "v_cache"])
 
@@ -1138,10 +1142,6 @@ class MHATokenToKVPool(KVCache):
                         cache_k.shape[-1] % hadamard_order == 0
                     ), f"head_dim must be divisible by {hadamard_order}"
                     if _fuse_hadamard_int4_kv:
-                        from sglang.QuantKernel.fused_hadamard_int4_kv import (
-                            quantized_set_kv_int4_hadamard_fused_triton,
-                            validate_hadamard_order_for_kv_fuse,
-                        )
 
                         validate_hadamard_order_for_kv_fuse(
                             hadamard_order, cache_k.shape[-1]
