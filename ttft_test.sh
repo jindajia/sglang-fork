@@ -13,7 +13,7 @@
 #             Run dump_centroids.sh first to generate them.
 #
 # GPU scheduling: configs on non-overlapping GPUs launch in parallel.
-# Results: throughput_results/{model_short}/{rot_suffix}/bs{N}_{in_label}.csv
+# Results: ttft_results/{model_short}/{rot_suffix}/bs{N}_{in_label}.csv
 
 set -eo pipefail
 
@@ -34,10 +34,10 @@ trap cleanup INT TERM
 # Throughput Test Parameters
 # =============================================================================
 # BATCH_SIZES=(1 8 16 32)
-BATCH_SIZES=(1 16)
-INPUT_LENS=(8192)
-OUTPUT_LENS=(1024)
-NUM_EXAMPLES=16
+BATCH_SIZES=(1 4 8)
+INPUT_LENS=(16384 32768 65536)
+OUTPUT_LENS=(10)
+NUM_EXAMPLES=32
 
 # =============================================================================
 # Model Configs
@@ -60,10 +60,10 @@ NUM_EXAMPLES=16
 MODEL_CONFIGS=(
     # ---- Qwen/Qwen3-8B ----------------------------------------
     # Baseline BF16 KV
-    "0|BASE  |0|0|0  |BF16|Qwen/Qwen3-8B|0|0,1|2|1|1"
-    "0|BASE  |0|0|0  |INT4|Qwen/Qwen3-8B|0|2,3|2|1|1"
-    "0|QUANT |1|0|128|INT4|Qwen/Qwen3-8B|0|4,5|2|1|1"
-    "1|QUANT |1|0|128|INT4|Qwen/Qwen3-8B|0|6,7|2|1|1"
+    "0|BASE  |0|0|0  |BF16|Qwen/Qwen3-8B|0|0,1,2,3,4,5,6,7|2|4|1"
+    "0|BASE  |0|0|0  |INT4|Qwen/Qwen3-8B|0|0,1,2,3,4,5,6,7|2|4|1"
+    "0|QUANT |1|0|128|INT4|Qwen/Qwen3-8B|0|0,1,2,3,4,5,6,7|2|4|1"
+    "1|QUANT |1|0|128|INT4|Qwen/Qwen3-8B|0|0,1,2,3,4,5,6,7|2|4|1"
 )
 
 # =============================================================================
@@ -89,8 +89,8 @@ DUMP_TOKENS=20000
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TORE_SPEED_EVAL_DIR="$SCRIPT_DIR/tore-speed-eval"
-RESULTS_DIR="$SCRIPT_DIR/throughput_results"
-LOGS_DIR="$SCRIPT_DIR/throughput_logs"
+RESULTS_DIR="$SCRIPT_DIR/ttft_results"
+LOGS_DIR="$SCRIPT_DIR/ttft_logs"
 
 export HF_HOME=/data/shared/huggingface
 
@@ -653,11 +653,11 @@ for i in "${!MODEL_CONFIGS[@]}"; do
             wait "${PIDS[$i]}"
             EXIT_CODES[$i]=$?
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] Cooling down 60s for GPU memory to release..."
-            sleep 60 &
+            sleep 30 &
             wait $!
         else
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] No GPU overlap with next config, sleeping 60s before launching next..."
-            sleep 60 &
+            sleep 30 &
             wait $!
         fi
     fi

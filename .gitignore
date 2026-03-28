@@ -281,3 +281,5 @@ eval_results/
 eval_logs/
 .venv/
 datasets/
+ttft_logs/
+ttft_results/
