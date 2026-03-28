@@ -38,12 +38,12 @@ if [ -d "$CONDA_ENV_DIR" ]; then
 fi
 
 echo "=== Creating conda environment '$CONDA_ENV_NAME' (python 3.10) ==="
-"$CONDA" create -y -n "$CONDA_ENV_NAME" python=3.10 -q
+"$CONDA" create -y -n "$CONDA_ENV_NAME" python=3.10
 
 echo "=== Installing cuda-nvcc 12.8 (needed to compile fast-hadamard-transform) ==="
 "$CONDA" install -y -n "$CONDA_ENV_NAME" \
     -c "nvidia/label/cuda-12.8.0" -c nvidia -c conda-forge \
-    "cuda-nvcc=12.8.*" -q
+    "cuda-nvcc=12.8.*"
 
 # Build a self-contained CUDA_HOME layout from the scattered conda install paths
 mkdir -p "$CONDA_ENV_DIR/cuda-home/bin"
@@ -58,24 +58,24 @@ ln -sfn "$CONDA_ENV_DIR/targets/x86_64-linux/lib/stubs/libcuda.so" \
     "$CONDA_ENV_DIR/lib64/stubs/libcuda.so"
 
 echo "=== Installing base build dependencies ==="
-"$CONDA_ENV_DIR/bin/pip" install grpcio-tools numpy packaging ninja ipykernel -q
+"$CONDA_ENV_DIR/bin/pip" install grpcio-tools numpy packaging ninja ipykernel
 
 echo "=== Installing requirements-eval.txt (ray, word2number, flash-kmeans, lm_eval, ...) ==="
-"$CONDA_ENV_DIR/bin/pip" install -r "$SCRIPT_DIR/requirements-eval.txt" -q
+"$CONDA_ENV_DIR/bin/pip" install -r "$SCRIPT_DIR/requirements-eval.txt"
 
 echo "=== Installing sglang from this repo (editable) ==="
-"$CONDA_ENV_DIR/bin/pip" install -e "$SCRIPT_DIR/python" --no-build-isolation -q
+"$CONDA_ENV_DIR/bin/pip" install -e "$SCRIPT_DIR/python" --no-build-isolation
 
 echo "=== Installing fast-hadamard-transform (compiled) ==="
 CUDA_HOME="$CONDA_ENV_DIR/cuda-home" \
 PATH="$CONDA_ENV_DIR/nvvm/bin:$CONDA_ENV_DIR/bin:/usr/bin:$PATH" \
     "$CONDA_ENV_DIR/bin/pip" install \
     "git+https://github.com/Dao-AILab/fast-hadamard-transform.git" \
-    --no-build-isolation -q
+    --no-build-isolation
 
 echo "=== Installing flash-kmeans (jindajia fork, required for _euclid_iter_compiled) ==="
 "$CONDA_ENV_DIR/bin/pip" install --force-reinstall --no-deps \
-    "git+https://github.com/jindajia/flash-kmeans" -q
+    "git+https://github.com/jindajia/flash-kmeans"
 
 echo "=== Initializing tore-speed-eval submodule ==="
 git -C "$SCRIPT_DIR" submodule update --init --recursive
@@ -93,7 +93,7 @@ if [ ! -f "$TORE_EVAL_DIR/setup.py" ] && [ ! -f "$TORE_EVAL_DIR/pyproject.toml" 
     exit 1
 fi
 rm -rf "$TORE_EVAL_DIR/src/tore_speed_eval.egg-info" 2>/dev/null || true
-"$CONDA_ENV_DIR/bin/pip" install -e "$TORE_EVAL_DIR" -q
+"$CONDA_ENV_DIR/bin/pip" install -e "$TORE_EVAL_DIR"
 
 echo ""
 echo "✓ Environment '$CONDA_ENV_NAME' ready at $CONDA_ENV_DIR (fused_kv_rotation)"
