@@ -608,7 +608,7 @@ for i in "${!MODEL_CONFIGS[@]}"; do
 
     model_short="$(extract_model_short_name "$model_name")"
     kv_dtype_lower="${kv_dtype,,}"
-    local fuse_suffix; fuse_suffix=$([[ "$fuse_hadamard" == "1" ]] && echo "fused" || echo "unfused")
+    fuse_suffix=$([[ "$fuse_hadamard" == "1" ]] && echo "fused" || echo "unfused")
     if [[ "$mode" == "BASE" ]]; then
         rot_suffix="baseline_${kv_dtype_lower}"
     elif [[ "$mode" == "QUANT" ]]; then
