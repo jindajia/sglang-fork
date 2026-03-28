@@ -65,6 +65,7 @@ MODEL_CONFIGS=(
     # "1|QUANT |1|0|16 |INT4|Qwen/Qwen3-8B|0|2|1|1|1"
     # "1|QUANT |1|0|64 |INT4|Qwen/Qwen3-8B|0|3|1|1|1"
     "1|QUANT |1|0|128|INT4|Qwen/Qwen3-8B|0|0,1|2|1|1"
+    "0|QUANT |1|0|128|INT4|Qwen/Qwen3-8B|0|2,3|2|1|1"
 )
 
 # =============================================================================
@@ -333,16 +334,17 @@ benchmark_single_model() {
     esac
 
     local kv_dtype_lower="${kv_dtype,,}"
+    local fuse_suffix; fuse_suffix=$([[ "$fuse_hadamard" == "1" ]] && echo "fused" || echo "unfused")
     local rot_suffix
     if [[ "$mode" == "BASE" ]]; then
         rot_suffix="baseline_${kv_dtype_lower}"
     elif [[ "$mode" == "QUANT" ]]; then
-        rot_suffix="quant_${kv_dtype_lower}_${hadamard}_${rotate_v}_${hadamard_order}"
+        rot_suffix="quant_${kv_dtype_lower}_${hadamard}_${rotate_v}_${hadamard_order}_${fuse_suffix}"
     else
         if [[ "$hadamard" == "0" && "$rotate_v" == "0" ]]; then
             rot_suffix="kmeans_${n_clusters}"
         else
-            rot_suffix="kmeans_quant_${n_clusters}_${kv_dtype_lower}_${hadamard}_${rotate_v}_${hadamard_order}"
+            rot_suffix="kmeans_quant_${n_clusters}_${kv_dtype_lower}_${hadamard}_${rotate_v}_${hadamard_order}_${fuse_suffix}"
         fi
     fi
 
@@ -606,15 +608,16 @@ for i in "${!MODEL_CONFIGS[@]}"; do
 
     model_short="$(extract_model_short_name "$model_name")"
     kv_dtype_lower="${kv_dtype,,}"
+    local fuse_suffix; fuse_suffix=$([[ "$fuse_hadamard" == "1" ]] && echo "fused" || echo "unfused")
     if [[ "$mode" == "BASE" ]]; then
         rot_suffix="baseline_${kv_dtype_lower}"
     elif [[ "$mode" == "QUANT" ]]; then
-        rot_suffix="quant_${kv_dtype_lower}_${hadamard}_${rotate_v}_${hadamard_order}"
+        rot_suffix="quant_${kv_dtype_lower}_${hadamard}_${rotate_v}_${hadamard_order}_${fuse_suffix}"
     else
         if [[ "$hadamard" == "0" && "$rotate_v" == "0" ]]; then
             rot_suffix="kmeans_${n_clusters}"
         else
-            rot_suffix="kmeans_quant_${n_clusters}_${kv_dtype_lower}_${hadamard}_${rotate_v}_${hadamard_order}"
+            rot_suffix="kmeans_quant_${n_clusters}_${kv_dtype_lower}_${hadamard}_${rotate_v}_${hadamard_order}_${fuse_suffix}"
         fi
     fi
 
