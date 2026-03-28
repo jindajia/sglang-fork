@@ -351,6 +351,7 @@ benchmark_single_model() {
     local result_dir="$RESULTS_DIR/${model_short}/${rot_suffix}"
     local log_dir="$LOGS_DIR/${model_short}"
     mkdir -p "$result_dir" "$log_dir"
+    local BATCH_LOG_FILE
     BATCH_LOG_FILE=$(unique_log_path "$log_dir/${rot_suffix}.log")
 
     log_message "=========================================="
