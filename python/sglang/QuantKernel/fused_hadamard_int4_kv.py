@@ -19,6 +19,11 @@ FWHT runs on in-kernel tensors (``tl.gather`` butterfly); no global scratch buff
 Like ``quantized_set_kv_int4_triton``, the launcher can process **several heads per program**
 (``heads_per_program``, default ``min(8, num_heads)``) to cut grid size; ``rotate_v=False``
 uses the same tiling on the plain int4 V path.
+
+**Autotune:** For large padded head dims (``next_power_of_2(head_dim) >= 1024``), Triton
+autotune uses a **single** launch config to avoid multi-minute compile+search (many orders ×
+many warp/stage combos on huge ``tl.arange`` kernels looks like a hang). Medium sizes use a
+reduced grid of configs.
 """
 
 from __future__ import annotations
@@ -80,9 +85,23 @@ def _fwht_blocked_segments_tensor(x, head_dim_: tl.constexpr, LOG: tl.constexpr)
 
 _AUTOTUNE_CONFIGS = [
     triton.Config({}, num_warps=w, num_stages=s)
-    for w in (1, 2, 4, 8, 16)
+    for w in (1, 2, 4)
     for s in (1, 2, 3)
 ]
+
+
+def _autotune_configs_for_head_dim(head_dim: int):
+    """Fewer configs for large ``head_dim_pad`` — full 5×3 autotune is prohibitively slow."""
+    hdp = triton.next_power_of_2(head_dim)
+    if hdp >= 1024:
+        return [triton.Config({}, num_warps=1, num_stages=1)]
+    if hdp >= 512:
+        return [
+            triton.Config({}, num_warps=w, num_stages=s)
+            for w in (1, 2)
+            for s in (1, 2, 3)
+        ]
+    return list(_AUTOTUNE_CONFIGS)
 
 
 def _make_fused_kernel(head_dim: int, hadamard_order: int):
@@ -95,8 +114,9 @@ def _make_fused_kernel(head_dim: int, hadamard_order: int):
     # zero-filled extra blocks never contaminate the real transform blocks.
     head_dim_pad = triton.next_power_of_2(head_dim)
     pre_scale    = 1.0 / math.sqrt(float(hadamard_order))
+    autotune_cfgs = _autotune_configs_for_head_dim(head_dim)
 
-    @triton.autotune(configs=_AUTOTUNE_CONFIGS, key=["num_tokens", "num_heads"])
+    @triton.autotune(configs=autotune_cfgs, key=["head_dim_"])
     @triton.jit
     def _fused_hadamard_int4_set_kv_kernel(
         input_ptr,
@@ -190,7 +210,7 @@ def _make_fused_kernel(head_dim: int, hadamard_order: int):
 
 
 _KERNEL_CACHE: Dict[Tuple[int, int, int], Tuple] = {}
-_KERNEL_REV = 11  # bump when JIT changes (invalidates cache)
+_KERNEL_REV = 12  # bump when JIT changes (invalidates cache)
 
 def _get_kernel(head_dim: int, hadamard_order: int):
     k = (head_dim, hadamard_order, _KERNEL_REV)
@@ -198,6 +218,20 @@ def _get_kernel(head_dim: int, hadamard_order: int):
         fn, cfg = _make_fused_kernel(head_dim, hadamard_order)
         _KERNEL_CACHE[k] = (fn, cfg)
     return _KERNEL_CACHE[k]
+
+
+def _fused_default_heads_per_program(head_dim: int, num_heads: int) -> int:
+    """Default ``heads_per_program`` when the caller passes ``None``.
+
+    For large padded head dim (1024+), each program already holds a wide fp32 vector for the
+    FWHT; processing multiple heads in one program shrinks the grid and tends to reduce
+    throughput. Smaller head dims keep ``min(8, num_heads)`` like ``quantized_set_kv_int4_triton``.
+    """
+    if num_heads <= 0:
+        return 1
+    if triton.next_power_of_2(head_dim) >= 512:
+        return 1
+    return min(8, num_heads)
 
 
 def quantized_set_kv_int4_hadamard_fused_triton(
@@ -230,7 +264,7 @@ def quantized_set_kv_int4_hadamard_fused_triton(
     _validate_hadamard_order_impl(hadamard_order, head_dim)
 
     if heads_per_program is None:
-        hpp = min(8, num_heads) if num_heads > 0 else 1
+        hpp = _fused_default_heads_per_program(head_dim, num_heads)
     else:
         hpp = max(1, int(heads_per_program))
     hpp = min(hpp, num_heads) if num_heads > 0 else 1
