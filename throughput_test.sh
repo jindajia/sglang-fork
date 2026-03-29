@@ -33,11 +33,10 @@ trap cleanup INT TERM
 # =============================================================================
 # Throughput Test Parameters
 # =============================================================================
-# BATCH_SIZES=(1 8 16 32)
-BATCH_SIZES=(1 16)
+BATCH_SIZES=(  1   8  16  32)
 INPUT_LENS=(8192)
 OUTPUT_LENS=(1024)
-NUM_EXAMPLES=16
+NUM_EXAMPLES=( 4  32  32  32)   # paired 1:1 with BATCH_SIZES
 
 # =============================================================================
 # Model Configs
@@ -60,10 +59,10 @@ NUM_EXAMPLES=16
 MODEL_CONFIGS=(
     # ---- Qwen/Qwen3-8B ----------------------------------------
     # Baseline BF16 KV
-    "0|BASE  |0|0|0  |BF16|Qwen/Qwen3-8B|0|0,1|2|1|1"
-    "0|BASE  |0|0|0  |INT4|Qwen/Qwen3-8B|0|2,3|2|1|1"
-    "0|QUANT |1|0|128|INT4|Qwen/Qwen3-8B|0|4,5|2|1|1"
-    "1|QUANT |1|0|128|INT4|Qwen/Qwen3-8B|0|6,7|2|1|1"
+    "0|BASE  |0|0|0  |BF16|Qwen/Qwen3-32B|0|0,1|2|1|1"
+    "0|BASE  |0|0|0  |INT4|Qwen/Qwen3-32B|0|2,3|2|1|1"
+    "0|QUANT |1|0|128|INT4|Qwen/Qwen3-32B|0|4,5|2|1|1"
+    "1|QUANT |1|0|128|INT4|Qwen/Qwen3-32B|0|6,7|2|1|1"
 )
 
 # =============================================================================
@@ -72,7 +71,7 @@ MODEL_CONFIGS=(
 # =============================================================================
 declare -A MODEL_NUM_LAYERS=(
     ["Qwen/Qwen3-8B"]=36
-    ["Qwen/Qwen3-8B"]=36
+    ["Qwen/Qwen3-32B"]=64
     ["zai-org/GLM-4.7-FP8"]=92
 )
 
@@ -362,7 +361,7 @@ benchmark_single_model() {
     [[ "$mode" == "KMEANS" ]] && log_message "N_CLUSTERS=$n_clusters"
     log_message "Batch sizes:  ${BATCH_SIZES[*]}"
     log_message "Input lens:   ${INPUT_LENS[*]}"
-    log_message "Output lens:  ${OUTPUT_LENS[*]}  num_examples: ${NUM_EXAMPLES}"
+    log_message "Output lens:  ${OUTPUT_LENS[*]}  num_examples: ${NUM_EXAMPLES[*]}"
     log_message "Results dir:  $result_dir"
     log_message "=========================================="
 
@@ -464,7 +463,9 @@ benchmark_single_model() {
     # ------------------------------------------------------------------
     local stats_log="${result_dir}/per_request_stats.log"
     local overall_exit=0
-    for bs in "${BATCH_SIZES[@]}"; do
+    for idx in "${!BATCH_SIZES[@]}"; do
+        bs="${BATCH_SIZES[$idx]}"
+        local num_examples="${NUM_EXAMPLES[$idx]}"
         for input_len in "${INPUT_LENS[@]}"; do
             for output_len in "${OUTPUT_LENS[@]}"; do
                 local label_in label_out
@@ -482,7 +483,6 @@ benchmark_single_model() {
                 local log_line_before
                 log_line_before=$(wc -l < "$server_log" 2>/dev/null || echo 0)
 
-                local num_examples=$NUM_EXAMPLES
                 log_message "  BS=${bs}  input=${label_in}  output=${label_out}  examples=${num_examples}"
                 set +e
                 cd "$SCRIPT_DIR"
@@ -566,7 +566,7 @@ echo "[$(date '+%Y-%m-%d %H:%M:%S')] Configs:       ${#MODEL_CONFIGS[@]} entry(s
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Batch sizes:   ${BATCH_SIZES[*]}"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Input lens:    ${INPUT_LENS[*]}"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Output lens:   ${OUTPUT_LENS[*]}"
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] Num examples:  ${NUM_EXAMPLES}"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Num examples:  ${NUM_EXAMPLES[*]}"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] GPU free threshold: ${GPU_FREE_MEM_MB} MB"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] KV dump base:  ${KV_DUMP_BASE}"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] =========================================="
