@@ -34,7 +34,7 @@ trap cleanup INT TERM
 # Throughput Test Parameters
 # =============================================================================
 # BATCH_SIZES=(1 8 16 32)
-BATCH_SIZES=(1 4 8)
+BATCH_SIZES=(1)
 INPUT_LENS=(8192 16384 32768)
 OUTPUT_LENS=(10)
 NUM_EXAMPLES=32
@@ -65,9 +65,13 @@ MODEL_CONFIGS=(
     # "0|QUANT |1|0|128|INT4|Qwen/Qwen3-8B|0|0,1,2,3,4,5,6,7|2|1|4"
     # "1|QUANT |1|0|128|INT4|Qwen/Qwen3-8B|0|0,1,2,3,4,5,6,7|2|1|4"
     # "0|BASE  |0|0|0  |BF16|Qwen/Qwen3-32B|0|0,1,2,3,4,5,6,7|2|1|4"
-    "0|BASE  |0|0|0  |INT4|Qwen/Qwen3-32B|0|0,1,2,3,4,5,6,7|2|1|4"
-    "0|QUANT |1|0|128|INT4|Qwen/Qwen3-32B|0|0,1,2,3,4,5,6,7|2|1|4"
-    "1|QUANT |1|0|128|INT4|Qwen/Qwen3-32B|0|0,1,2,3,4,5,6,7|2|1|4"
+    # "0|BASE  |0|0|0  |INT4|Qwen/Qwen3-32B|0|0,1,2,3,4,5,6,7|2|1|4"
+    # "0|QUANT |1|0|128|INT4|Qwen/Qwen3-32B|0|0,1,2,3,4,5,6,7|2|1|4"
+    # "1|QUANT |1|0|128|INT4|Qwen/Qwen3-32B|0|0,1,2,3,4,5,6,7|2|1|4"
+    "0|BASE  |0|0|0  |BF16|zai-org/GLM-4.7-FP8|0|0,1,2,3,4,5,6,7|8|1|1"
+    "0|BASE  |0|0|0  |INT4|zai-org/GLM-4.7-FP8|0|0,1,2,3,4,5,6,7|8|1|1"
+    "0|QUANT |1|0|128|INT4|zai-org/GLM-4.7-FP8|0|0,1,2,3,4,5,6,7|8|1|1"
+    "1|QUANT |1|0|128|INT4|zai-org/GLM-4.7-FP8|0|0,1,2,3,4,5,6,7|8|1|1"
 )
 
 # =============================================================================
@@ -503,7 +507,7 @@ benchmark_single_model() {
                     --synthetic_output_length="$output_len" \
                     --stream=true \
                     --temperature=1.0 \
-                    --top_p=0.7 \
+                    --top_p=0.95 \
                     --num_gpus="$tp_size" \
                     --concurrency="$bs" \
                     --num_examples="$num_examples" \
