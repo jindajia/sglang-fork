@@ -15,12 +15,16 @@ cases from the unfused path.
 it if your Triton build successfully compiles larger blocks.
 
 FWHT runs on in-kernel tensors (``tl.gather`` butterfly); no global scratch buffers.
+
+Like ``quantized_set_kv_int4_triton``, the launcher can process **several heads per program**
+(``heads_per_program``, default ``min(8, num_heads)``) to cut grid size; ``rotate_v=False``
+uses the same tiling on the plain int4 V path.
 """
 
 from __future__ import annotations
 
 import math
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 import torch
 import triton
@@ -115,61 +119,66 @@ def _make_fused_kernel(head_dim: int, hadamard_order: int):
         LOG      : tl.constexpr,
         PRE_SCALE: tl.constexpr,
         BLOCK_HALF: tl.constexpr,
+        HEADS_PER_PROGRAM: tl.constexpr,
     ):
         token_idx = tl.program_id(0)
-        head_idx  = tl.program_id(1)
-        if token_idx >= num_tokens or head_idx >= num_heads:
+        head_group = tl.program_id(1)
+
+        if token_idx >= num_tokens:
             return
 
         cache_loc = tl.load(loc_ptr + token_idx)
 
-        # ── load bf16 row into power-of-2 buffer, cast to fp32, pre-scale ──
-        dim_full      = tl.arange(0, head_dim_pad_)   # power-of-2 size required by tl.arange
-        input_off     = token_idx * input_stride_token + head_idx * input_stride_head
-        x             = tl.load(
-            input_ptr + input_off + dim_full * input_stride_dim,
-            mask=dim_full < head_dim_,                # mask real elements only
-            other=0.0,
-        ).to(tl.float32) * PRE_SCALE
+        for hh in tl.static_range(0, HEADS_PER_PROGRAM):
+            head_idx = head_group * HEADS_PER_PROGRAM + hh
+            if head_idx < num_heads:
+                # ── load bf16 row into power-of-2 buffer, cast to fp32, pre-scale ──
+                dim_full = tl.arange(0, head_dim_pad_)
+                input_off = (
+                    token_idx * input_stride_token + head_idx * input_stride_head
+                )
+                x = tl.load(
+                    input_ptr + input_off + dim_full * input_stride_dim,
+                    mask=dim_full < head_dim_,
+                    other=0.0,
+                ).to(tl.float32) * PRE_SCALE
 
-        # ── in-kernel blocked FWHT (1 gather/stage, compile-time permutations) ─
-        x = _fwht_blocked_segments_tensor(x, head_dim_pad_, LOG)
+                x = _fwht_blocked_segments_tensor(x, head_dim_pad_, LOG)
 
-        # ── split into lo / hi halves; bf16 round-trip matches unfused path ──
-        half_dim   = head_dim_ // 2
-        dim_off    = tl.arange(0, BLOCK_HALF)
-        dim_mask   = dim_off < half_dim
-        safe_off1  = tl.where(dim_mask, dim_off,            0)
-        safe_off2  = tl.where(dim_mask, dim_off + half_dim, 0)
-        vals1      = (
-            tl.where(dim_mask, tl.gather(x, safe_off1, 0), 0.0)
-            .to(tl.bfloat16).to(tl.float32)
-        )
-        vals2      = (
-            tl.where(dim_mask, tl.gather(x, safe_off2, 0), 0.0)
-            .to(tl.bfloat16).to(tl.float32)
-        )
+                half_dim = head_dim_ // 2
+                dim_off = tl.arange(0, BLOCK_HALF)
+                dim_mask = dim_off < half_dim
+                safe_off1 = tl.where(dim_mask, dim_off, 0)
+                safe_off2 = tl.where(dim_mask, dim_off + half_dim, 0)
+                vals1 = (
+                    tl.where(dim_mask, tl.gather(x, safe_off1, 0), 0.0)
+                    .to(tl.bfloat16)
+                    .to(tl.float32)
+                )
+                vals2 = (
+                    tl.where(dim_mask, tl.gather(x, safe_off2, 0), 0.0)
+                    .to(tl.bfloat16)
+                    .to(tl.float32)
+                )
 
-        # ── per-head min–max int4 quant ──────────────────────────────────────
-        val_min    = tl.minimum(tl.min(vals1, 0), tl.min(vals2, 0))
-        val_max    = tl.maximum(tl.max(vals1, 0), tl.max(vals2, 0))
-        val_range  = tl.maximum(val_max - val_min, 1e-8)
-        scale      = val_range / 15.0
-        zero       = -val_min / scale
-        q1         = (vals1 / scale + zero + 0.5).to(tl.uint8)
-        q2         = (vals2 / scale + zero + 0.5).to(tl.uint8)
-        packed     = q1 | (q2 << 4)
+                val_min = tl.minimum(tl.min(vals1, 0), tl.min(vals2, 0))
+                val_max = tl.maximum(tl.max(vals1, 0), tl.max(vals2, 0))
+                val_range = tl.maximum(val_max - val_min, 1e-8)
+                scale = val_range / 15.0
+                zero = -val_min / scale
+                q1 = (vals1 / scale + zero + 0.5).to(tl.uint8)
+                q2 = (vals2 / scale + zero + 0.5).to(tl.uint8)
+                packed = q1 | (q2 << 4)
 
-        # ── store packed bytes and scale / zero ──────────────────────────────
-        cache_off  = (
-            cache_loc * cache_stride_loc
-            + head_idx * cache_stride_head
-            + dim_off  * cache_stride_dim
-        )
-        tl.store(cache_ptr + cache_off, packed, mask=dim_mask)
-        sz_base    = cache_loc * sz_stride_loc + head_idx * sz_stride_head
-        tl.store(scales_zeros_ptr + sz_base + 0 * sz_stride_dim, scale)
-        tl.store(scales_zeros_ptr + sz_base + 1 * sz_stride_dim, zero)
+                cache_off = (
+                    cache_loc * cache_stride_loc
+                    + head_idx * cache_stride_head
+                    + dim_off * cache_stride_dim
+                )
+                tl.store(cache_ptr + cache_off, packed, mask=dim_mask)
+                sz_base = cache_loc * sz_stride_loc + head_idx * sz_stride_head
+                tl.store(scales_zeros_ptr + sz_base + 0 * sz_stride_dim, scale)
+                tl.store(scales_zeros_ptr + sz_base + 1 * sz_stride_dim, zero)
 
     return _fused_hadamard_int4_set_kv_kernel, {
         "head_dim_"    : head_dim,
@@ -181,7 +190,7 @@ def _make_fused_kernel(head_dim: int, hadamard_order: int):
 
 
 _KERNEL_CACHE: Dict[Tuple[int, int, int], Tuple] = {}
-_KERNEL_REV = 10  # bump when JIT changes (invalidates cache)
+_KERNEL_REV = 11  # bump when JIT changes (invalidates cache)
 
 def _get_kernel(head_dim: int, hadamard_order: int):
     k = (head_dim, hadamard_order, _KERNEL_REV)
@@ -203,11 +212,16 @@ def quantized_set_kv_int4_hadamard_fused_triton(
     work_k: torch.Tensor | None = None,
     work_v: torch.Tensor | None = None,
     rotate_v: bool = True,
+    heads_per_program: Optional[int] = None,
 ) -> None:
     """
     Fused Hadamard along ``hadamard_order``-sized blocks + int4 pack.
 
     ``work_k`` / ``work_v`` are ignored (kept for backward compatibility; no scratch buffers).
+
+    ``heads_per_program``: like ``quantized_set_kv_int4_triton`` — how many heads one program
+    processes sequentially. ``None`` defaults to ``min(8, num_heads)``; use ``1`` for legacy
+    one-head-per-program tiling.
     """
     _ = (work_k, work_v)
     num_tokens, num_heads, head_dim = cache_k.shape
@@ -215,8 +229,14 @@ def quantized_set_kv_int4_hadamard_fused_triton(
     assert head_dim % 2 == 0
     _validate_hadamard_order_impl(hadamard_order, head_dim)
 
+    if heads_per_program is None:
+        hpp = min(8, num_heads) if num_heads > 0 else 1
+    else:
+        hpp = max(1, int(heads_per_program))
+    hpp = min(hpp, num_heads) if num_heads > 0 else 1
+
     kernel, cfg = _get_kernel(head_dim, hadamard_order)
-    fused_grid = (num_tokens, num_heads)
+    fused_grid = (num_tokens, triton.cdiv(num_heads, hpp))
 
     def _launch(inp, cache_buf, sz_buf):
         kernel[fused_grid](
@@ -230,6 +250,7 @@ def quantized_set_kv_int4_hadamard_fused_triton(
             LOG=cfg["LOG"],
             PRE_SCALE=cfg["PRE_SCALE"],
             BLOCK_HALF=cfg["BLOCK_HALF"],
+            HEADS_PER_PROGRAM=hpp,
         )
 
     _launch(cache_k, k_cache_buffer, k_scales_zeros_buffer)
@@ -238,7 +259,8 @@ def quantized_set_kv_int4_hadamard_fused_triton(
         _launch(cache_v, v_cache_buffer, v_scales_zeros_buffer)
     else:
         BLOCK_SIZE_DIM = triton.next_power_of_2(head_dim // 2)
-        _quantized_set_kv_int4_kernel[fused_grid](
+        int4_grid = (num_tokens, triton.cdiv(num_heads, hpp))
+        _quantized_set_kv_int4_kernel[int4_grid](
             cache_v,
             loc,
             v_cache_buffer,
@@ -256,6 +278,7 @@ def quantized_set_kv_int4_hadamard_fused_triton(
             v_scales_zeros_buffer.stride(1),
             v_scales_zeros_buffer.stride(2),
             BLOCK_SIZE_DIM=BLOCK_SIZE_DIM,
+            HEADS_PER_PROGRAM=hpp,
             num_warps=1,
             num_stages=1,
         )
