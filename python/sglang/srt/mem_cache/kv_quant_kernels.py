@@ -2,6 +2,10 @@
 Triton kernels for efficient KV cache quantization (INT4/INT8).
 """
 
+from __future__ import annotations
+
+from typing import Optional
+
 import torch
 import triton
 import triton.language as tl
@@ -94,69 +98,64 @@ def _quantized_set_kv_int4_kernel(
     sz_stride_head,
     sz_stride_dim,
     BLOCK_SIZE_DIM: tl.constexpr,
+    HEADS_PER_PROGRAM: tl.constexpr,
 ):
     token_idx = tl.program_id(0)
-    head_idx = tl.program_id(1)
+    head_group = tl.program_id(1)
 
-    if token_idx >= num_tokens or head_idx >= num_heads:
+    if token_idx >= num_tokens:
         return
 
     cache_loc = tl.load(loc_ptr + token_idx)
 
     half_dim = head_dim // 2
     dim_offsets = tl.arange(0, BLOCK_SIZE_DIM)
-
     dim_mask = dim_offsets < half_dim
 
-    input_offset_base = token_idx * input_stride_token + head_idx * input_stride_head
+    for h in tl.static_range(0, HEADS_PER_PROGRAM):
+        head_idx = head_group * HEADS_PER_PROGRAM + h
+        if head_idx < num_heads:
+            input_offset_base = token_idx * input_stride_token + head_idx * input_stride_head
 
-    # Load first and second halves
-    # BUG FIX: Must multiply half_dim by stride to get correct memory offset
-    vals1 = tl.load(
-        input_ptr + input_offset_base + dim_offsets * input_stride_dim,
-        mask=dim_mask,
-        other=0.0,
-    ).to(tl.float32)
+            vals1 = tl.load(
+                input_ptr + input_offset_base + dim_offsets * input_stride_dim,
+                mask=dim_mask,
+                other=0.0,
+            ).to(tl.float32)
 
-    vals2 = tl.load(
-        input_ptr + input_offset_base + (dim_offsets + half_dim) * input_stride_dim,
-        mask=dim_mask,
-        other=0.0,
-    ).to(tl.float32)
+            vals2 = tl.load(
+                input_ptr + input_offset_base + (dim_offsets + half_dim) * input_stride_dim,
+                mask=dim_mask,
+                other=0.0,
+            ).to(tl.float32)
 
-    # Compute min/max across both halves
-    val_min_1 = tl.min(vals1, axis=0)
-    val_min_2 = tl.min(vals2, axis=0)
-    val_max_1 = tl.max(vals1, axis=0)
-    val_max_2 = tl.max(vals2, axis=0)
+            val_min_1 = tl.min(vals1, axis=0)
+            val_min_2 = tl.min(vals2, axis=0)
+            val_max_1 = tl.max(vals1, axis=0)
+            val_max_2 = tl.max(vals2, axis=0)
 
-    val_min = tl.minimum(val_min_1, val_min_2)
-    val_max = tl.maximum(val_max_1, val_max_2)
+            val_min = tl.minimum(val_min_1, val_min_2)
+            val_max = tl.maximum(val_max_1, val_max_2)
 
-    # Compute scale and zero
-    val_range = tl.maximum(val_max - val_min, 1e-8)
-    scale = val_range / 15.0
-    zero = -val_min / scale
+            val_range = tl.maximum(val_max - val_min, 1e-8)
+            scale = val_range / 15.0
+            zero = -val_min / scale
 
-    # Quantize both halves
-    q_vals1 = (vals1 / scale + zero + 0.5).to(tl.uint8)
-    q_vals2 = (vals2 / scale + zero + 0.5).to(tl.uint8)
+            q_vals1 = (vals1 / scale + zero + 0.5).to(tl.uint8)
+            q_vals2 = (vals2 / scale + zero + 0.5).to(tl.uint8)
 
-    # Pack: lower nibble from vals1, upper nibble from vals2
-    packed = q_vals1 | (q_vals2 << 4)
+            packed = q_vals1 | (q_vals2 << 4)
 
-    # Store packed values directly to cache buffer using location
-    cache_offset = (
-        cache_loc * cache_stride_loc
-        + head_idx * cache_stride_head
-        + dim_offsets * cache_stride_dim
-    )
-    tl.store(cache_ptr + cache_offset, packed, mask=dim_mask)
+            cache_offset = (
+                cache_loc * cache_stride_loc
+                + head_idx * cache_stride_head
+                + dim_offsets * cache_stride_dim
+            )
+            tl.store(cache_ptr + cache_offset, packed, mask=dim_mask)
 
-    # Store scale and zero to scales_zeros buffer [cache_loc, head_idx, 0/1]
-    sz_offset_base = cache_loc * sz_stride_loc + head_idx * sz_stride_head
-    tl.store(scales_zeros_ptr + sz_offset_base + 0 * sz_stride_dim, scale)
-    tl.store(scales_zeros_ptr + sz_offset_base + 1 * sz_stride_dim, zero)
+            sz_offset_base = cache_loc * sz_stride_loc + head_idx * sz_stride_head
+            tl.store(scales_zeros_ptr + sz_offset_base + 0 * sz_stride_dim, scale)
+            tl.store(scales_zeros_ptr + sz_offset_base + 1 * sz_stride_dim, zero)
 
 
 def quantized_set_kv_int8_triton(
@@ -240,6 +239,7 @@ def quantized_set_kv_int4_triton(
     v_cache_buffer: torch.Tensor,
     k_scales_zeros_buffer: torch.Tensor,
     v_scales_zeros_buffer: torch.Tensor,
+    heads_per_program: Optional[int] = None,
 ):
     """
     Quantize K and V caches to INT4 and write directly to cache buffers using Triton kernels.
@@ -252,6 +252,9 @@ def quantized_set_kv_int4_triton(
         v_cache_buffer: Output V cache [cache_size, num_heads, head_dim//2] (packed)
         k_scales_zeros_buffer: K scales/zeros [cache_size, num_heads, 2]
         v_scales_zeros_buffer: V scales/zeros [cache_size, num_heads, 2]
+        heads_per_program: How many attention heads one Triton program processes sequentially.
+            Reduces grid size (fewer launches per token). Default ``None`` uses
+            ``min(8, num_heads)``. Use ``1`` for the legacy one-head-per-program behavior.
 
     Returns:
         None (writes directly to buffers)
@@ -259,9 +262,14 @@ def quantized_set_kv_int4_triton(
     num_tokens, num_heads, head_dim = cache_k.shape
     assert head_dim % 2 == 0, f"head_dim must be even for INT4, got {head_dim}"
 
-    # Launch kernel
+    if heads_per_program is None:
+        hpp = min(8, num_heads) if num_heads > 0 else 1
+    else:
+        hpp = max(1, int(heads_per_program))
+    hpp = min(hpp, num_heads) if num_heads > 0 else 1
+
     BLOCK_SIZE_DIM = triton.next_power_of_2(head_dim // 2)
-    grid = (num_tokens, num_heads)
+    grid = (num_tokens, triton.cdiv(num_heads, hpp))
 
     # Quantize K
     _quantized_set_kv_int4_kernel[grid](
@@ -282,6 +290,7 @@ def quantized_set_kv_int4_triton(
         k_scales_zeros_buffer.stride(1),
         k_scales_zeros_buffer.stride(2),
         BLOCK_SIZE_DIM=BLOCK_SIZE_DIM,
+        HEADS_PER_PROGRAM=hpp,
         num_warps=1,
         num_stages=1,
     )
@@ -305,6 +314,7 @@ def quantized_set_kv_int4_triton(
         v_scales_zeros_buffer.stride(1),
         v_scales_zeros_buffer.stride(2),
         BLOCK_SIZE_DIM=BLOCK_SIZE_DIM,
+        HEADS_PER_PROGRAM=hpp,
         num_warps=1,
         num_stages=1,
     )
