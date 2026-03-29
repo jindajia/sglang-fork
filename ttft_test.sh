@@ -35,7 +35,7 @@ trap cleanup INT TERM
 # =============================================================================
 # BATCH_SIZES=(1 8 16 32)
 BATCH_SIZES=(1 4 8)
-INPUT_LENS=(16384 32768 65536)
+INPUT_LENS=(8192 16384 32768)
 OUTPUT_LENS=(10)
 NUM_EXAMPLES=32
 
@@ -64,7 +64,7 @@ MODEL_CONFIGS=(
     # "0|BASE  |0|0|0  |INT4|Qwen/Qwen3-8B|0|0,1,2,3,4,5,6,7|2|1|4"
     # "0|QUANT |1|0|128|INT4|Qwen/Qwen3-8B|0|0,1,2,3,4,5,6,7|2|1|4"
     # "1|QUANT |1|0|128|INT4|Qwen/Qwen3-8B|0|0,1,2,3,4,5,6,7|2|1|4"
-    "0|BASE  |0|0|0  |BF16|Qwen/Qwen3-32B|0|0,1,2,3,4,5,6,7|2|1|4"
+    # "0|BASE  |0|0|0  |BF16|Qwen/Qwen3-32B|0|0,1,2,3,4,5,6,7|2|1|4"
     "0|BASE  |0|0|0  |INT4|Qwen/Qwen3-32B|0|0,1,2,3,4,5,6,7|2|1|4"
     "0|QUANT |1|0|128|INT4|Qwen/Qwen3-32B|0|0,1,2,3,4,5,6,7|2|1|4"
     "1|QUANT |1|0|128|INT4|Qwen/Qwen3-32B|0|0,1,2,3,4,5,6,7|2|1|4"
@@ -76,7 +76,7 @@ MODEL_CONFIGS=(
 # =============================================================================
 declare -A MODEL_NUM_LAYERS=(
     ["Qwen/Qwen3-8B"]=36
-    ["Qwen/Qwen3-8B"]=36
+    ["Qwen/Qwen3-32B"]=64
     ["zai-org/GLM-4.7-FP8"]=92
 )
 
@@ -188,9 +188,9 @@ wait_for_gpus_free() {
     fi
 }
 
-# Convert token count to short label: 8192 → in8k, 16384 → in16k, 32768 → in32k
-input_len_label()  { echo "in$((${1} / 1024))k"; }
-output_len_label() { echo "out$((${1} / 1024))k"; }
+# Convert token count to short label: 8192 → in8k, 16384 → in16k; small values kept as-is: 10 → out10
+input_len_label()  { local n=$((${1} / 1024)); [ "$n" -gt 0 ] && echo "in${n}k" || echo "in${1}"; }
+output_len_label() { local n=$((${1} / 1024)); [ "$n" -gt 0 ] && echo "out${n}k" || echo "out${1}"; }
 
 # =============================================================================
 # extract_per_request_stats
@@ -420,6 +420,7 @@ benchmark_single_model() {
         --enable-request-time-stats-logging \
         --disable-radix-cache \
         --chunked-prefill-size 32768 \
+        --max-prefill-tokens 131072 \
         > "$server_log" 2>&1 &
     local server_pid=$!
     log_message "Server started (PID: $server_pid)"
