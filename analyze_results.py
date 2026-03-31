@@ -19,14 +19,29 @@ OUTPUT_FILE = RESULTS_DIR / "summary.md"
 
 # Config display order and labels
 CONFIG_ORDER = [
-    ("baseline_bf16",     "BF16"),
-    ("baseline_int4",     "INT4"),
-    ("quant_int4_1_0_16", "INT4 + R16 (k)"),
-    ("quant_int4_1_1_16", "INT4 + R16 (k&v)"),
-    ("quant_int4_1_0_64", "INT4 + R64 (k)"),
-    ("quant_int4_1_1_64", "INT4 + R64 (k&v)"),
-    ("quant_int4_1_0_128","INT4 + R128 (k)"),
-    ("quant_int4_1_1_128","INT4 + R128 (k&v)"),
+    ("baseline_bf16",              "BF16"),
+    ("baseline_int4",              "INT4"),
+    # Rotation only (Hadamard)
+    ("rotation_int4_1_0_16",       "INT4 + Rotation H16 (k)"),
+    ("rotation_int4_1_1_16",       "INT4 + Rotation H16 (k&v)"),
+    ("rotation_int4_1_0_64",       "INT4 + Rotation H64 (k)"),
+    ("rotation_int4_1_1_64",       "INT4 + Rotation H64 (k&v)"),
+    ("rotation_int4_1_0_128",      "INT4 + Rotation H128 (k)"),
+    ("rotation_int4_1_1_128",      "INT4 + Rotation H128 (k&v)"),
+    # Rotation + QR
+    ("rotation_qr_int4_1_0_16",    "INT4 + Rotation_QR H16 (k)"),
+    ("rotation_qr_int4_1_1_16",    "INT4 + Rotation_QR H16 (k&v)"),
+    ("rotation_qr_int4_1_0_64",    "INT4 + Rotation_QR H64 (k)"),
+    ("rotation_qr_int4_1_1_64",    "INT4 + Rotation_QR H64 (k&v)"),
+    ("rotation_qr_int4_1_0_128",   "INT4 + Rotation_QR H128 (k)"),
+    ("rotation_qr_int4_1_1_128",   "INT4 + Rotation_QR H128 (k&v)"),
+    # Legacy (kv_rotation repo)
+    ("quant_int4_1_0_16",          "INT4 + R16 (k) [legacy]"),
+    ("quant_int4_1_1_16",          "INT4 + R16 (k&v) [legacy]"),
+    ("quant_int4_1_0_64",          "INT4 + R64 (k) [legacy]"),
+    ("quant_int4_1_1_64",          "INT4 + R64 (k&v) [legacy]"),
+    ("quant_int4_1_0_128",         "INT4 + R128 (k) [legacy]"),
+    ("quant_int4_1_1_128",         "INT4 + R128 (k&v) [legacy]"),
 ]
 CONFIG_KEY_TO_LABEL = {k: v for k, v in CONFIG_ORDER}
 CONFIG_KEYS_ORDERED = [k for k, _ in CONFIG_ORDER]

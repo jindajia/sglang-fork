@@ -20,10 +20,15 @@
 
 set -eo pipefail
 
+# Redirect TMPDIR away from /tmp (system disk may fill up)
+export TMPDIR="/data/${USER}/tmp"
+mkdir -p "$TMPDIR"
+
 cleanup() {
+    trap '' INT TERM   # prevent recursive trap invocation
     echo ""
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Interrupted — killing all child processes..."
-    kill -- -$$ 2>/dev/null || true
+    kill -9 -- -$$ 2>/dev/null || true
     exit 130
 }
 trap cleanup INT TERM
@@ -59,13 +64,14 @@ MODEL_CONFIGS=(
     # "BASE        |0 |0 |0  |BF16 |Qwen/Qwen3-4B-Thinking-2507   |                                                                                         |0   |1 |1 |1 |${TASKS_ALL}"
     # "BASE        |0 |0 |0  |INT4 |Qwen/Qwen3-4B-Thinking-2507   |                                                                                         |1   |1 |1 |1 |${TASKS_ONCE}"
     # "Rotation    |1 |0 |16 |INT4 |Qwen/Qwen3-4B-Thinking-2507   |                                                                                         |2   |1 |1 |1 |${TASKS_ALL}"
-    "Rotation_QR |1 |0 |16 |INT4 |Qwen/Qwen3-4B-Thinking-2507   |/data/jisenli2/zhongzhu_kv/q_rotation_layer_second_moment_damp01.pt                      |3   |1 |1 |1 |${TASKS_ALL}"
+    "Rotation_QR |1 |0 |16 |INT4 |Qwen/Qwen3-4B-Thinking-2507   |/data/jisenli2/zhongzhu_kv/q_rotation_layer_second_moment_damp01.pt                      |6   |1 |1 |1 |${TASKS_ALL}"
+    "Rotation_QR |1 |0 |64 |INT4 |Qwen/Qwen3-4B-Thinking-2507   |/data/jisenli2/zhongzhu_kv/q_rotation_layer_second_moment_damp01.pt                      |7   |1 |1 |1 |${TASKS_ALL}"
 )
 
 # =============================================================================
 # Server & Eval Config
 # =============================================================================
-BASE_PORT=30100
+BASE_PORT=30900
 NUM_WORKERS=64
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -271,8 +277,10 @@ eval_single_model() {
     local -a server_env=(
         PYTHONPATH="${local_pythonpath}"
         CUDA_VISIBLE_DEVICES="${gpu_devices}"
+        PATH="$(dirname "$PYTHON"):$PATH"
         LIBRARY_PATH="/usr/local/cuda/targets/x86_64-linux/lib${LIBRARY_PATH:+:${LIBRARY_PATH}}"
         LD_LIBRARY_PATH="/usr/local/cuda/targets/x86_64-linux/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+        TVM_CACHE_DIR="/data/${USER}/.cache/tvm-ffi"
     )
 
     case "$mode" in
@@ -292,6 +300,7 @@ eval_single_model() {
                 HADAMARD_ORDER="${hadamard_order}"
                 ROTATE_V="${rotate_v}"
                 SGLANG_Q_ROTATION_PATH="${q_rotation_path}"
+                SGLANG_Q_ROTATION_COMPUTE_DTYPE="float32"
             )
             ;;
     esac

@@ -39,6 +39,9 @@ echo "=== Installing cuda-nvcc 12.8 (needed to compile fast-hadamard-transform) 
     -c "nvidia/label/cuda-12.8.0" -c nvidia -c conda-forge \
     "cuda-nvcc=12.8.*" -q
 
+echo "=== Installing system ninja (needed for tvm_ffi JIT compilation) ==="
+"$CONDA" install -y -n "$CONDA_ENV_NAME" -c conda-forge ninja -q
+
 # Build a self-contained CUDA_HOME layout from the scattered conda install paths
 mkdir -p "$CONDA_ENV_DIR/cuda-home/bin"
 ln -sfn "$CONDA_ENV_DIR/bin/nvcc"                          "$CONDA_ENV_DIR/cuda-home/bin/nvcc"
@@ -52,7 +55,7 @@ ln -sfn "$CONDA_ENV_DIR/targets/x86_64-linux/lib/stubs/libcuda.so" \
     "$CONDA_ENV_DIR/lib64/stubs/libcuda.so"
 
 echo "=== Installing base build dependencies ==="
-"$CONDA_ENV_DIR/bin/pip" install grpcio-tools numpy packaging ninja ipykernel -q
+"$CONDA_ENV_DIR/bin/pip" install grpcio-tools numpy packaging ninja ipykernel transformers -q
 
 echo "=== Installing requirements-eval.txt ==="
 "$CONDA_ENV_DIR/bin/pip" install -r "$SCRIPT_DIR/requirements-eval.txt" -q
@@ -88,6 +91,14 @@ if [ ! -f "$TORE_EVAL_DIR/setup.py" ] && [ ! -f "$TORE_EVAL_DIR/pyproject.toml" 
 fi
 rm -rf "$TORE_EVAL_DIR/src/tore_eval.egg-info" 2>/dev/null || true
 "$CONDA_ENV_DIR/bin/pip" install -e "$TORE_EVAL_DIR" -q
+
+echo "=== Installing tore-speed-eval (editable, for throughput benchmarking) ==="
+TORE_SPEED_EVAL_DIR="/data/jisenli2/kv_rotation/tore-speed-eval"
+if [ ! -f "$TORE_SPEED_EVAL_DIR/pyproject.toml" ] && [ ! -f "$TORE_SPEED_EVAL_DIR/setup.py" ]; then
+    echo "WARNING: tore-speed-eval not found at $TORE_SPEED_EVAL_DIR, skipping."
+else
+    "$CONDA_ENV_DIR/bin/pip" install -e "$TORE_SPEED_EVAL_DIR" -q
+fi
 
 echo ""
 echo "✓ Environment '$CONDA_ENV_NAME' ready at $CONDA_ENV_DIR"

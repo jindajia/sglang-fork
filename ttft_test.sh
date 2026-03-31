@@ -1,7 +1,7 @@
 #!/bin/bash
-# throughput_test.sh — SGLang throughput benchmarking for Hadamard / Hadamard+QR KV cache
+# ttft_test.sh — SGLang TTFT benchmarking for Hadamard / Hadamard+QR KV cache
 #
-# Measures OTPS / TPS across batch sizes and input lengths.
+# Measures TTFT / OTPS / TPS at BS=1 across input lengths.
 #
 # Modes:
 #   BASE         — no rotation (BF16 or INT4 KV)
@@ -9,7 +9,7 @@
 #   Rotation_QR  — Hadamard rotation + learned Q-rotation matrix (INT4 KV)
 #
 # GPU scheduling: configs on non-overlapping GPUs launch in parallel.
-# Results: throughput_results/{model_short}/{rot_suffix}/bs{N}_{in_label}_{out_label}.csv
+# Results: ttft_results/{model_short}/{rot_suffix}/bs{N}_{in_label}_{out_label}.csv
 
 set -eo pipefail
 
@@ -29,12 +29,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$SCRIPT_DIR"
 
 # =============================================================================
-# Throughput Test Parameters
+# TTFT Test Parameters
 # =============================================================================
-BATCH_SIZES=(256)
-INPUT_LENS=(8192)
-OUTPUT_LENS=(1024)
-NUM_EXAMPLES=(256)
+BATCH_SIZES=(1)
+INPUT_LENS=(8192 16384 32768)
+OUTPUT_LENS=(10)
+NUM_EXAMPLES=32
 
 # =============================================================================
 # Model Configs
@@ -55,11 +55,10 @@ NUM_EXAMPLES=(256)
 #
 MODEL_CONFIGS=(
     # mode         |rk|rv|ho |dtype|model                          |q_rotation_path                                                                     |gpu|tp|ep|dp
-    "Rotation_QR   |1 |0 |16 |INT4 |Qwen/Qwen3-4B-Thinking-2507   |/data/jisenli2/zhongzhu_kv/q_rotation_layer_second_moment_damp01.pt                 |0,1  |2 |1 |1"
-    "Rotation_QR   |1 |0 |128|INT4|Qwen/Qwen3-4B-Thinking-2507  |/data/jisenli2/zhongzhu_kv/q_rotation_layer_second_moment_damp01.pt                   |2,3  |2 |1 |1"
+    "Rotation_QR   |1 |0 |16 |INT4 |Qwen/Qwen3-4B-Thinking-2507   |/data/jisenli2/zhongzhu_kv/q_rotation_layer_second_moment_damp01.pt                 |4,5  |2 |1 |1"
+    "Rotation_QR   |1 |0 |128|INT4|Qwen/Qwen3-4B-Thinking-2507  |/data/jisenli2/zhongzhu_kv/q_rotation_layer_second_moment_damp01.pt                   |6,7  |2 |1 |1"
     # "Rotation_QR   |1 |0 |16 |INT4 |Qwen/Qwen3-8B   |/data/jisenli2/zhongzhu_kv/q_rotation_layer_second_moment_damp01.pt                               |4,5  |2 |1 |1"
     # "Rotation_QR   |1 |0 |128|INT4|Qwen/Qwen3-8B  |/data/jisenli2/zhongzhu_kv/q_rotation_layer_second_moment_damp01.pt                                 |6,7  |2 |1 |1"
-    
     # "BASE         |0 |0 |0  |BF16 |Qwen/Qwen3-4B-Thinking-2507   |                                                                                    |0  |1 |1 |1"
     # "BASE         |0 |0 |0  |INT4 |Qwen/Qwen3-4B-Thinking-2507   |                                                                                    |1  |1 |1 |1"
     # "Rotation     |1 |0 |16 |INT4 |Qwen/Qwen3-4B-Thinking-2507   |                                                                                    |2  |1 |1 |1"
@@ -68,15 +67,15 @@ MODEL_CONFIGS=(
 # =============================================================================
 # Server & Path Config
 # =============================================================================
-BASE_PORT=30700
+BASE_PORT=30600
 
 CONDA_ENV_DIR="/data/$USER/miniconda/envs/zhongzhu_kv"
 PYTHON_BIN="$CONDA_ENV_DIR/bin/python3"
 
 TORE_SPEED_EVAL_DIR="${TORE_SPEED_EVAL_DIR:-/data/jisenli2/kv_rotation/tore-speed-eval}"
 
-RESULTS_DIR="${RESULTS_DIR:-${REPO_ROOT}/throughput_results}"
-LOGS_DIR="${LOGS_DIR:-${REPO_ROOT}/throughput_logs}"
+RESULTS_DIR="${RESULTS_DIR:-${REPO_ROOT}/ttft_results}"
+LOGS_DIR="${LOGS_DIR:-${REPO_ROOT}/ttft_logs}"
 
 export HF_HOME="${HF_HOME:-/data/shared/huggingface}"
 export TRITON_CACHE_DIR="${TRITON_CACHE_DIR:-/data/${USER}/.triton/cache}"
@@ -308,7 +307,7 @@ benchmark_single_model() {
     [[ "$mode" == "Rotation_QR" ]] && log_message "Q rotation:    $q_rotation_path"
     log_message "Batch sizes:   ${BATCH_SIZES[*]}"
     log_message "Input lens:    ${INPUT_LENS[*]}"
-    log_message "Output lens:   ${OUTPUT_LENS[*]}  num_examples: ${NUM_EXAMPLES[*]}"
+    log_message "Output lens:   ${OUTPUT_LENS[*]}  num_examples: ${NUM_EXAMPLES}"
     log_message "Results dir:   $result_dir"
     log_message "=========================================="
 
@@ -362,7 +361,6 @@ benchmark_single_model() {
             --tensor-parallel-size "$tp_size" \
             --expert-parallel-size "$ep_size" \
             --data-parallel-size "$dp_size" \
-            --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 119}' \
             --host 0.0.0.0 \
             --port "$server_port" \
             --trust-remote-code \
@@ -371,6 +369,7 @@ benchmark_single_model() {
             --enable-request-time-stats-logging \
             --disable-radix-cache \
             --chunked-prefill-size 32768 \
+            --max-prefill-tokens 131072 \
             > "$server_log" 2>&1 &
     local server_pid=$!
     log_message "Server started (PID: $server_pid)"
@@ -409,13 +408,11 @@ benchmark_single_model() {
     log_message "✓ Warmup done"
 
     # ------------------------------------------------------------------
-    # Throughput sweeps: BS × input_len × output_len
+    # TTFT sweeps: BS × input_len × output_len
     # ------------------------------------------------------------------
     local stats_log="${result_dir}/per_request_stats.log"
     local overall_exit=0
-    for idx in "${!BATCH_SIZES[@]}"; do
-        local bs="${BATCH_SIZES[$idx]}"
-        local num_examples="${NUM_EXAMPLES[$idx]}"
+    for bs in "${BATCH_SIZES[@]}"; do
         for input_len in "${INPUT_LENS[@]}"; do
             for output_len in "${OUTPUT_LENS[@]}"; do
                 local label_in label_out
@@ -431,7 +428,7 @@ benchmark_single_model() {
                 local log_line_before
                 log_line_before=$(wc -l < "$server_log" 2>/dev/null || echo 0)
 
-                log_message "  BS=${bs}  input=${label_in}  output=${label_out}  examples=${num_examples}"
+                log_message "  BS=${bs}  input=${label_in}  output=${label_out}  examples=${NUM_EXAMPLES}"
                 set +e
                 cd "$REPO_ROOT"
                 CUDA_VISIBLE_DEVICES="" \
@@ -446,10 +443,10 @@ benchmark_single_model() {
                     --synthetic_output_length="$output_len" \
                     --stream=true \
                     --temperature=1.0 \
-                    --top_p=0.7 \
+                    --top_p=0.95 \
                     --num_gpus="$tp_size" \
                     --concurrency="$bs" \
-                    --num_examples="$num_examples" \
+                    --num_examples="$NUM_EXAMPLES" \
                     --chat=false \
                     2>&1 | tee -a "$BATCH_LOG_FILE"
                 local eval_exit=${PIPESTATUS[0]}
@@ -505,12 +502,12 @@ fi
 
 echo ""
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] =========================================="
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] Hadamard/QR KV Cache Throughput Benchmark"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Hadamard/QR KV Cache TTFT Benchmark"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Configs:        ${#MODEL_CONFIGS[@]} entry(s)"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Batch sizes:    ${BATCH_SIZES[*]}"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Input lens:     ${INPUT_LENS[*]}"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Output lens:    ${OUTPUT_LENS[*]}"
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] Num examples:   ${NUM_EXAMPLES[*]}"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Num examples:   ${NUM_EXAMPLES}"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Python:         $PYTHON_BIN"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Results dir:    $RESULTS_DIR"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] =========================================="
@@ -579,11 +576,11 @@ for i in "${!MODEL_CONFIGS[@]}"; do
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] Next config overlaps GPU(s) [$next_gpu], waiting for current job..."
             wait "${PIDS[$i]}"
             EXIT_CODES[$i]=$?
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Cooling down 60s..."
-            sleep 60 & wait $!
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Cooling down 30s..."
+            sleep 30 & wait $!
         else
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] No GPU overlap, sleeping 60s before next launch..."
-            sleep 60 & wait $!
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] No GPU overlap, sleeping 30s before next launch..."
+            sleep 30 & wait $!
         fi
     fi
 done

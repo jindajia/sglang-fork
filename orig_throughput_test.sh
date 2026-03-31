@@ -1,18 +1,21 @@
 #!/bin/bash
 # throughput_test.sh — SGLang throughput benchmarking for Hadamard / Hadamard+QR KV cache
 #
-# Measures OTPS / TPS across batch sizes and input lengths.
-#
 # Modes:
 #   BASE         — no rotation (BF16 or INT4 KV)
 #   Rotation     — Hadamard rotation only (INT4 KV)
 #   Rotation_QR  — Hadamard rotation + learned Q-rotation matrix (INT4 KV)
 #
 # GPU scheduling: configs on non-overlapping GPUs launch in parallel.
-# Results: throughput_results/{model_short}/{rot_suffix}/bs{N}_{in_label}_{out_label}.csv
+# Results: throughput_results/{model_short}/{rot_suffix}/bs{N}_{in_label}.csv
+#
+# Usage:
+#   PYTHON_BIN=/path/to/python bash throughput_test.sh
+#   or set PYTHON_BIN in the environment (same as launch_hadamard_qr_server_tp1.sh)
 
 set -eo pipefail
 
+# Redirect TMPDIR away from /tmp (system disk may fill up)
 export TMPDIR="/data/${USER}/tmp"
 mkdir -p "$TMPDIR"
 
@@ -31,18 +34,17 @@ REPO_ROOT="$SCRIPT_DIR"
 # =============================================================================
 # Throughput Test Parameters
 # =============================================================================
-BATCH_SIZES=(256)
-INPUT_LENS=(8192)
-OUTPUT_LENS=(1024)
-NUM_EXAMPLES=(256)
-
+BATCH_SIZES=(1 8 16 32)
+INPUT_LENS=(8192 16384 32768)
+MAX_NEW_TOKENS=10
+# NUM_EXAMPLES = BATCH_SIZE (each BS runs exactly BS examples)
 # =============================================================================
 # Model Configs
 # =============================================================================
 # Format: "mode|rotate_k|rotate_v|hadamard_order|kv_dtype|model_name|q_rotation_path|gpu_devices|tp_size|ep_size|dp_size"
 #
 #   mode            : BASE, Rotation, or Rotation_QR
-#   rotate_k        : 1 = rotate K; ignored for BASE
+#   rotate_k        : 1 = rotate K (HADAMARD=1); ignored for BASE
 #   rotate_v        : 1 = also rotate V; ignored for BASE
 #   hadamard_order  : e.g. 16, 64 (ignored for BASE)
 #   kv_dtype        : BF16 or INT4
@@ -54,25 +56,23 @@ NUM_EXAMPLES=(256)
 #   dp_size         : data parallel size
 #
 MODEL_CONFIGS=(
-    # mode         |rk|rv|ho |dtype|model                          |q_rotation_path                                                                     |gpu|tp|ep|dp
-    "Rotation_QR   |1 |0 |16 |INT4 |Qwen/Qwen3-4B-Thinking-2507   |/data/jisenli2/zhongzhu_kv/q_rotation_layer_second_moment_damp01.pt                 |0,1  |2 |1 |1"
-    "Rotation_QR   |1 |0 |128|INT4|Qwen/Qwen3-4B-Thinking-2507  |/data/jisenli2/zhongzhu_kv/q_rotation_layer_second_moment_damp01.pt                   |2,3  |2 |1 |1"
-    # "Rotation_QR   |1 |0 |16 |INT4 |Qwen/Qwen3-8B   |/data/jisenli2/zhongzhu_kv/q_rotation_layer_second_moment_damp01.pt                               |4,5  |2 |1 |1"
-    # "Rotation_QR   |1 |0 |128|INT4|Qwen/Qwen3-8B  |/data/jisenli2/zhongzhu_kv/q_rotation_layer_second_moment_damp01.pt                                 |6,7  |2 |1 |1"
-    
-    # "BASE         |0 |0 |0  |BF16 |Qwen/Qwen3-4B-Thinking-2507   |                                                                                    |0  |1 |1 |1"
-    # "BASE         |0 |0 |0  |INT4 |Qwen/Qwen3-4B-Thinking-2507   |                                                                                    |1  |1 |1 |1"
-    # "Rotation     |1 |0 |16 |INT4 |Qwen/Qwen3-4B-Thinking-2507   |                                                                                    |2  |1 |1 |1"
+    # mode        |rk|rv|ho |dtype|model                          |q_rotation_path                                                                     |gpu|tp|ep|dp
+    # "BASE        |0 |0 |0  |BF16 |Qwen/Qwen3-4B-Thinking-2507   |                                                                                    |0  |1 |1 |1"
+    # "BASE        |0 |0 |0  |INT4 |Qwen/Qwen3-4B-Thinking-2507   |                                                                                    |1  |1 |1 |1"
+    # "Rotation    |1 |0 |16 |INT4 |Qwen/Qwen3-4B-Thinking-2507   |                                                                                    |2  |1 |1 |1"
+    "Rotation_QR |1 |0 |16 |INT4 |Qwen/Qwen3-4B-Thinking-2507   |/data/jisenli2/zhongzhu_kv/q_rotation_layer_second_moment_damp01.pt                 |5  |1 |1 |1"
 )
 
 # =============================================================================
 # Server & Path Config
 # =============================================================================
-BASE_PORT=30700
+BASE_PORT=30800
 
+# Hardcoded conda env path
 CONDA_ENV_DIR="/data/$USER/miniconda/envs/zhongzhu_kv"
 PYTHON_BIN="$CONDA_ENV_DIR/bin/python3"
 
+# tore-speed-eval: defaults to the one in the sibling kv_rotation repo; override with env var
 TORE_SPEED_EVAL_DIR="${TORE_SPEED_EVAL_DIR:-/data/jisenli2/kv_rotation/tore-speed-eval}"
 
 RESULTS_DIR="${RESULTS_DIR:-${REPO_ROOT}/throughput_results}"
@@ -163,11 +163,12 @@ wait_for_gpus_free() {
     fi
 }
 
-input_len_label()  { local n=$((${1} / 1024)); [ "$n" -gt 0 ] && echo "in${n}k"  || echo "in${1}"; }
-output_len_label() { local n=$((${1} / 1024)); [ "$n" -gt 0 ] && echo "out${n}k" || echo "out${1}"; }
+# Convert token count to short label: 8192 → in8k
+input_len_label() { echo "in$((${1} / 1024))k"; }
 
 # =============================================================================
 # extract_per_request_stats
+#   Parse SGLang "Finish:" log lines and append a summary block.
 # =============================================================================
 extract_per_request_stats() {
     local server_log="$1" log_line_before="$2" rot_suffix="$3" \
@@ -256,6 +257,7 @@ benchmark_single_model() {
         return 1
     fi
 
+    # Validate q_rotation_path for Rotation_QR
     if [[ "$mode" == "Rotation_QR" ]]; then
         if [[ -z "$q_rotation_path" ]]; then
             echo "ERROR: Rotation_QR mode requires q_rotation_path to be set"
@@ -274,15 +276,6 @@ benchmark_single_model() {
         *)    kv_cache_dtype="auto" ;;
     esac
 
-    local prefill_backend decode_backend
-    if [[ "$kv_cache_dtype" == "int4" ]]; then
-        prefill_backend="fa3"
-        decode_backend="triton"
-    else
-        prefill_backend="triton"
-        decode_backend="triton"
-    fi
-
     local kv_dtype_lower="${kv_dtype,,}"
     local rot_suffix
     case "$mode" in
@@ -296,6 +289,18 @@ benchmark_single_model() {
     mkdir -p "$result_dir" "$log_dir"
     BATCH_LOG_FILE=$(unique_log_path "$log_dir/${rot_suffix}.log")
 
+    local mem_fraction="0.8"
+
+    # Prefill/decode backend: int4 requires fa3 + triton
+    local prefill_backend decode_backend
+    if [[ "$kv_cache_dtype" == "int4" ]]; then
+        prefill_backend="fa3"
+        decode_backend="triton"
+    else
+        prefill_backend="triton"
+        decode_backend="triton"
+    fi
+
     local local_pythonpath="${REPO_ROOT}/python${PYTHONPATH:+:${PYTHONPATH}}"
 
     log_message "=========================================="
@@ -308,7 +313,7 @@ benchmark_single_model() {
     [[ "$mode" == "Rotation_QR" ]] && log_message "Q rotation:    $q_rotation_path"
     log_message "Batch sizes:   ${BATCH_SIZES[*]}"
     log_message "Input lens:    ${INPUT_LENS[*]}"
-    log_message "Output lens:   ${OUTPUT_LENS[*]}  num_examples: ${NUM_EXAMPLES[*]}"
+    log_message "Max new tok:   $MAX_NEW_TOKENS  num_examples: <equals batch size>"
     log_message "Results dir:   $result_dir"
     log_message "=========================================="
 
@@ -354,7 +359,7 @@ benchmark_single_model() {
     env "${server_env[@]}" \
         "$PYTHON_BIN" -m sglang.launch_server \
             --model-path "$model_name" \
-            --mem-fraction-static 0.8 \
+            --mem-fraction-static "$mem_fraction" \
             --kv-cache-dtype "$kv_cache_dtype" \
             --prefill-attention-backend "$prefill_backend" \
             --decode-attention-backend "$decode_backend" \
@@ -362,18 +367,21 @@ benchmark_single_model() {
             --tensor-parallel-size "$tp_size" \
             --expert-parallel-size "$ep_size" \
             --data-parallel-size "$dp_size" \
-            --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 119}' \
             --host 0.0.0.0 \
             --port "$server_port" \
             --trust-remote-code \
             --log-requests \
             --log-requests-level 0 \
             --enable-request-time-stats-logging \
-            --disable-radix-cache \
-            --chunked-prefill-size 32768 \
+            --disable-radix-cache
             > "$server_log" 2>&1 &
     local server_pid=$!
     log_message "Server started (PID: $server_pid)"
+    # --max-running-requests 64 \
+    # --max-queued-requests 256 \
+    # --page-size 128 \
+    # --chunked-prefill-size 32768 \
+            
 
     if ! wait_for_server "$server_port" "$server_pid" "SGLang server"; then
         tail -50 "$server_log" | tee -a "$BATCH_LOG_FILE"
@@ -409,63 +417,58 @@ benchmark_single_model() {
     log_message "✓ Warmup done"
 
     # ------------------------------------------------------------------
-    # Throughput sweeps: BS × input_len × output_len
+    # Throughput sweeps: BS × input_len
     # ------------------------------------------------------------------
     local stats_log="${result_dir}/per_request_stats.log"
     local overall_exit=0
-    for idx in "${!BATCH_SIZES[@]}"; do
-        local bs="${BATCH_SIZES[$idx]}"
-        local num_examples="${NUM_EXAMPLES[$idx]}"
+    for bs in "${BATCH_SIZES[@]}"; do
         for input_len in "${INPUT_LENS[@]}"; do
-            for output_len in "${OUTPUT_LENS[@]}"; do
-                local label_in label_out
-                label_in=$(input_len_label "$input_len")
-                label_out=$(output_len_label "$output_len")
-                local csv_path="${result_dir}/bs${bs}_${label_in}_${label_out}.csv"
+            local label_in
+            label_in=$(input_len_label "$input_len")
+            local csv_path="${result_dir}/bs${bs}_${label_in}.csv"
 
-                if [ -f "$csv_path" ]; then
-                    log_message "  Skip BS=${bs} ${label_in} ${label_out}: already exists"
-                    continue
-                fi
+            if [ -f "$csv_path" ]; then
+                log_message "  Skip BS=${bs} ${label_in}: $csv_path already exists"
+                continue
+            fi
 
-                local log_line_before
-                log_line_before=$(wc -l < "$server_log" 2>/dev/null || echo 0)
+            local log_line_before
+            log_line_before=$(wc -l < "$server_log" 2>/dev/null || echo 0)
 
-                log_message "  BS=${bs}  input=${label_in}  output=${label_out}  examples=${num_examples}"
-                set +e
-                cd "$REPO_ROOT"
-                CUDA_VISIBLE_DEVICES="" \
-                "$PYTHON_BIN" -m tore_speed_eval.eval \
-                    --provider=vllm \
-                    --base_url="http://localhost:${server_port}/v1" \
-                    --api_key="" \
-                    --model_name="$model_name" \
-                    --evaluation_output_path="$csv_path" \
-                    --dataset_type=synthetic \
-                    --synthetic_input_length="$input_len" \
-                    --synthetic_output_length="$output_len" \
-                    --stream=true \
-                    --temperature=1.0 \
-                    --top_p=0.7 \
-                    --num_gpus="$tp_size" \
-                    --concurrency="$bs" \
-                    --num_examples="$num_examples" \
-                    --chat=false \
-                    2>&1 | tee -a "$BATCH_LOG_FILE"
-                local eval_exit=${PIPESTATUS[0]}
-                set -e
+            log_message "  BS=${bs}  input=${label_in}  output=${MAX_NEW_TOKENS}tok  examples=${bs}"
+            set +e
+            cd "$REPO_ROOT"
+            CUDA_VISIBLE_DEVICES="" \
+            "$PYTHON_BIN" -m tore_speed_eval.eval \
+                --provider=vllm \
+                --base_url="http://localhost:${server_port}/v1" \
+                --api_key="" \
+                --model_name="$model_name" \
+                --evaluation_output_path="$csv_path" \
+                --dataset_type=synthetic \
+                --synthetic_input_length="$input_len" \
+                --synthetic_output_length="$MAX_NEW_TOKENS" \
+                --stream=true \
+                --temperature=1.0 \
+                --top_p=0.7 \
+                --num_gpus="$tp_size" \
+                --concurrency="$bs" \
+                --num_examples="$bs" \
+                --chat=false \
+                2>&1 | tee -a "$BATCH_LOG_FILE"
+            local eval_exit=${PIPESTATUS[0]}
+            set -e
 
-                if [ $eval_exit -ne 0 ]; then
-                    log_message "  ✗ BS=${bs} ${label_in} ${label_out} failed (exit: $eval_exit)"
-                    overall_exit=$eval_exit
-                else
-                    log_message "  ✓ BS=${bs} ${label_in} ${label_out} -> $csv_path"
-                fi
+            if [ $eval_exit -ne 0 ]; then
+                log_message "  ✗ BS=${bs} ${label_in} failed (exit: $eval_exit)"
+                overall_exit=$eval_exit
+            else
+                log_message "  ✓ BS=${bs} ${label_in} -> $csv_path"
+            fi
 
-                extract_per_request_stats \
-                    "$server_log" "$log_line_before" "$rot_suffix" \
-                    "$bs" "${label_in}_${label_out}" "$stats_log"
-            done
+            extract_per_request_stats \
+                "$server_log" "$log_line_before" "$rot_suffix" \
+                "$bs" "$label_in" "$stats_log"
         done
     done
 
@@ -477,18 +480,21 @@ benchmark_single_model() {
 # Preflight checks
 # =============================================================================
 
+# 1. tore-speed-eval directory exists
 if [ ! -f "${TORE_SPEED_EVAL_DIR}/pyproject.toml" ] && [ ! -f "${TORE_SPEED_EVAL_DIR}/setup.py" ]; then
     echo "ERROR: tore-speed-eval not found at: ${TORE_SPEED_EVAL_DIR}"
     echo "       Set TORE_SPEED_EVAL_DIR env var to the correct path."
     exit 1
 fi
 
+# 2. Conda env / Python binary exists
 if [ ! -f "$PYTHON_BIN" ]; then
     echo "ERROR: conda env 'zhongzhu_kv' not found (expected Python at $PYTHON_BIN)."
     echo "       Run: bash setup_env.sh"
     exit 1
 fi
 
+# 3. tore_speed_eval installed; use pip show (avoids slow torch load)
 if ! "$PYTHON_BIN" -m pip show tore-speed-eval &>/dev/null; then
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] tore_speed_eval not found — installing from ${TORE_SPEED_EVAL_DIR}..."
     "$PYTHON_BIN" -m pip install -e "${TORE_SPEED_EVAL_DIR}" -q
@@ -509,9 +515,10 @@ echo "[$(date '+%Y-%m-%d %H:%M:%S')] Hadamard/QR KV Cache Throughput Benchmark"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Configs:        ${#MODEL_CONFIGS[@]} entry(s)"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Batch sizes:    ${BATCH_SIZES[*]}"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Input lens:     ${INPUT_LENS[*]}"
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] Output lens:    ${OUTPUT_LENS[*]}"
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] Num examples:   ${NUM_EXAMPLES[*]}"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Max new tokens: $MAX_NEW_TOKENS"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Num examples:   = batch size"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Python:         $PYTHON_BIN"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Repo root:      $REPO_ROOT"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Results dir:    $RESULTS_DIR"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] =========================================="
 echo ""
@@ -563,9 +570,10 @@ for i in "${!MODEL_CONFIGS[@]}"; do
                            "$server_port" &
     PIDS[$i]=$!
 
+    # If next config shares any GPU, wait for current job to finish first
     next=$((i + 1))
     if [ "$next" -lt "$N" ]; then
-        # gpu_devices is field 8 in config format
+        # gpu_devices is field 8 in the new config format
         next_gpu=$(echo "${MODEL_CONFIGS[$next]}" | cut -d'|' -f8 | tr -d ' ')
         overlap=0
         IFS=',' read -ra CUR_GPUS <<< "$gpu_devices"
@@ -576,14 +584,16 @@ for i in "${!MODEL_CONFIGS[@]}"; do
             done
         done
         if [ "$overlap" -eq 1 ]; then
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Next config overlaps GPU(s) [$next_gpu], waiting for current job..."
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Next config overlaps GPU(s) [$next_gpu], waiting for current job to finish..."
             wait "${PIDS[$i]}"
             EXIT_CODES[$i]=$?
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Cooling down 60s..."
-            sleep 60 & wait $!
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Cooling down 60s for GPU memory to release..."
+            sleep 60 &
+            wait $!
         else
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] No GPU overlap, sleeping 60s before next launch..."
-            sleep 60 & wait $!
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] No GPU overlap with next config, sleeping 60s before launching next..."
+            sleep 60 &
+            wait $!
         fi
     fi
 done
