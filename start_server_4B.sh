@@ -48,21 +48,16 @@ MODEL_CONFIGS=(
     # "KMEANS|1|0|16 |INT4|Qwen/Qwen3-4B-Thinking-2507     |16      |2,3             |2 |1 |1"
     # "KMEANS|1|0|16 |INT4|Qwen/Qwen3-4B-Thinking-2507     |256     |4,5             |2 |1 |1"
     # "KMEANS|1|0|16 |INT4|Qwen/Qwen3-4B-Thinking-2507     |2048    |6,7             |2 |1 |1"
-
-    # "BASE  |0|0|0  |FP8 |zai-org/GLM-4.7-FP8             |0       |0,1,2,3,4,5,6,7 |8 |1 |1"
-    "BASE  |0|0|0  |INT4|togethercomputer/CoderForge-Preview-4B    |0       |0,1,2,3,4,5,6,7 |8 |1 |1"
-    # "QUANT |1|0|16 |INT4|zai-org/GLM-4.7-FP8             |0       |0,1,2,3,4,5,6,7 |8 |1 |1"
-    # "QUANT |1|1|16 |INT4|zai-org/GLM-4.7-FP8             |0       |0,1,2,3,4,5,6,7 |8 |1 |1"
-    # "QUANT |1|0|64 |INT4|zai-org/GLM-4.7-FP8             |0       |0,1,2,3,4,5,6,7 |8 |1 |1"
-    # "QUANT |1|0|16 |INT4|zai-org/GLM-4.7-FP8             |0       |0,1,2,3,4,5,6,7 |8 |1 |1"
-    # "QUANT |1|0|128|INT4|zai-org/GLM-4.7-FP8             |0       |0,1,2,3,4,5,6,7 |8 |1 |1"
-    # "QUANT |1|1|128|INT4|zai-org/GLM-4.7-FP8             |0       |0,1,2,3,4,5,6,7 |8 |1 |1"
+    "BASE  |0|0|0  |BF16|togethercomputer/CoderForge-Preview-4B_test    |0       |0,1 |2 |1 |1"
+    "BASE  |0|0|0  |INT4|togethercomputer/CoderForge-Preview-4B_test    |0       |2,3 |2 |1 |1"
+    # "QUANT |1|0|16 |INT4|togethercomputer/CoderForge-Preview-4B_test    |0       |4,5 |2 |1 |1"
+    # "QUANT |1|0|128 |INT4|togethercomputer/CoderForge-Preview-4B_test   |0       |6,7 |2 |1 |1"
 )
 
 # =============================================================================
 # Server Config
 # =============================================================================
-BASE_PORT=30100
+BASE_PORT=30500
 
 KV_DUMP_BASE="${KV_DUMP_BASE:-/data/$USER/kv-cache}"
 DUMP_LM_EVAL_TASKS="mmlu_pro"

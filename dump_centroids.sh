@@ -27,6 +27,7 @@ trap cleanup INT TERM
 declare -A MODEL_NUM_LAYERS=(
     ["Qwen/Qwen3-4B-Thinking-2507"]=36
     ["Qwen/Qwen3-8B"]=36
+    ["Qwen/Qwen3-32B"]=64
     ["zai-org/GLM-4.7-FP8"]=92
 )
 
@@ -47,11 +48,10 @@ MODEL_CONFIGS=(
     # model                              |clusters|dump_gpus        |dtp|dep|ddp|kmeans_gpu
     # "Qwen/Qwen3-4B-Thinking-2507        |256      |0,1              |2  |1  |1  |0,1"
     # GLM-4.7-FP8 (TP=8, all 8 GPUs; Stage 1 skipped if dump already at /data/$USER/kv-cache/GLM-4.7-FP8/mmlu_pro-*-tokens/)
-    "zai-org/GLM-4.7-FP8               |1        |0,1,2,3,4,5,6,7  |8  |1  |1  |0"
-    "zai-org/GLM-4.7-FP8               |64        |0,1,2,3,4,5,6,7  |8  |1  |1  |1"
-    "zai-org/GLM-4.7-FP8               |16       |0,1,2,3,4,5,6,7  |8  |1  |1  |2"
-    "zai-org/GLM-4.7-FP8               |256      |0,1,2,3,4,5,6,7  |8  |1  |1  |4"
-    "zai-org/GLM-4.7-FP8               |2048     |0,1,2,3,4,5,6,7  |8  |1  |1  |6"
+    "Qwen/Qwen3-32B               |1        |0,1  |2  |1  |1  |0"
+    "Qwen/Qwen3-32B               |16        |2,3  |2  |1  |1  |1"
+    "Qwen/Qwen3-32B               |256      |4,5  |2  |1  |1  |4"
+    "Qwen/Qwen3-32B               |2048     |6,7  |2  |1  |1  |6"
 
     # "Qwen/Qwen3-4B-Thinking-2507        |16      |2,3  |2  |1  |1  |2,3"
     # "Qwen/Qwen3-4B-Thinking-2507        |256      |4,5  |2  |1  |1  |4,5"

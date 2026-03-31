@@ -96,9 +96,10 @@ MODEL_CONFIGS=(
     # "KMEANS|1|0|128 |INT4|Qwen/Qwen3-4B-Thinking-2507|256      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|4,5      |2  |1  |1  |${TASKS_ALL}"
     # "KMEANS|1|0|128 |INT4|Qwen/Qwen3-4B-Thinking-2507|2048      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|6,7      |2  |1  |1  |${TASKS_ONCE}"
     # kmeans c=2048 gpqa rerun
-    # "KMEANS|0|0|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|2048 |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|2,3  |2  |1  |1  |gpqa_think:5:2-3"
-    # "KMEANS|0|0|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|2048 |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|4,5  |2  |1  |1  |gpqa_think:5:4-4"
-    # "KMEANS|0|0|16 |INT4|Qwen/Qwen3-4B-Thinking-2507|2048 |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|6,7  |2  |1  |1  |gpqa_think:5:5-5"
+    "KMEANS|1|0|128 |INT4|Qwen/Qwen3-8B|1 |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|0,1  |2  |1  |1  |${TASKS_ALL}"
+    "KMEANS|1|0|128 |INT4|Qwen/Qwen3-8B|16 |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|2,3  |2  |1  |1  |${TASKS_ALL}"
+    "KMEANS|1|0|128 |INT4|Qwen/Qwen3-8B|256 |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|4,5  |2  |1  |1  |${TASKS_ALL}"
+    "KMEANS|1|0|128 |INT4|Qwen/Qwen3-8B|2048 |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|6,7  |2  |1  |1  |${TASKS_ALL}"
     # R3 (ho=128) rerun
     # "KMEANS|1|0|128 |INT4|Qwen/Qwen3-4B-Thinking-2507|2048 |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|0,1  |2  |1  |1  |math_500_think:5,aime25_think:5"
     # "KMEANS|1|0|128 |INT4|Qwen/Qwen3-4B-Thinking-2507|2048 |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|2,3  |2  |1  |1  |gpqa_think:5,humaneval_think:5"
@@ -114,7 +115,7 @@ MODEL_CONFIGS=(
     # mode  |h|rv|ho |dtype|model              |clusters|dump_gpus        |dtp|dep|ddp|kmeans_gpu|eval_gpus        |etp|eep|edp|tasks
     # Baseline
     # "BASE  |0|0|0  |FP8 |zai-org/GLM-4.7-FP8|0    |0                 |1  |1  |1  |0          |0,1,2,3,4,5,6,7  |8  |1  |1  |${TASKS_GLM_ALL}"
-    "BASE  |0|0|0  |INT4|zai-org/GLM-4.7-FP8|0    |0                 |1  |1  |1  |0          |0,1,2,3,4,5,6,7  |8  |1  |1  |${TASKS_GLM_ALL}"
+    # "BASE  |0|0|0  |INT4|zai-org/GLM-4.7-FP8|0    |0                 |1  |1  |1  |0          |0,1,2,3,4,5,6,7  |8  |1  |1  |${TASKS_GLM_ALL}"
     # Pure rotation — no K-means (QUANT mode)
     # "QUANT |1|0|16 |INT4|zai-org/GLM-4.7-FP8|0    |0                 |1  |1  |1  |0          |0,1,2,3,4,5,6,7  |8  |1  |1  |${TASKS_GLM_ALL}"
     # "QUANT |1|1|16 |INT4|zai-org/GLM-4.7-FP8|0    |0                 |1  |1  |1  |0          |0,1,2,3,4,5,6,7  |8  |1  |1  |${TASKS_GLM_ALL}"
@@ -156,7 +157,8 @@ CONDA_ENV_DIR="$CONDA_BASE/envs/$CONDA_ENV_NAME"
 PYTHON="$CONDA_ENV_DIR/bin/python3"
 LM_EVAL="$CONDA_ENV_DIR/bin/lm_eval"
 
-export TRITON_CACHE_DIR="/data/$USER/.triton/cache"
+# export TRITON_CACHE_DIR="/data/$USER/.triton/cache"
+export TRITON_CACHE_DIR="/dev/shm/triton_cache_$USER"
 
 GPU_FREE_MEM_MB="${GPU_FREE_MEM_MB:-500}"
 GPU_POLL_INTERVAL="${GPU_POLL_INTERVAL:-240}"

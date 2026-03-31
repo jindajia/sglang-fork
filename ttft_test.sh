@@ -33,10 +33,11 @@ trap cleanup INT TERM
 # =============================================================================
 # Throughput Test Parameters
 # =============================================================================
-BATCH_SIZES=(1 8 16 32 256)
-INPUT_LENS=(8192)
-OUTPUT_LENS=(1024)
-NUM_EXAMPLES=(4 32 32 32 256)   # paired 1:1 with BATCH_SIZES
+# BATCH_SIZES=(1 8 16 32)
+BATCH_SIZES=(1)
+INPUT_LENS=(8192 16384 32768)
+OUTPUT_LENS=(10)
+NUM_EXAMPLES=32
 
 # =============================================================================
 # Model Configs
@@ -72,20 +73,20 @@ MODEL_CONFIGS=(
     # "QUANT |1|0|512 |INT4|Qwen/Qwen3-4B-Thinking-2507|0|5|1|1|1"
     # "QUANT |1|0|1024 |INT4|Qwen/Qwen3-4B-Thinking-2507|0|6|1|1|1"
     # ---- KMEANS examples (uncomment and fill n_clusters as needed) -----------
-    "KMEANS|0|0|0 |INT4|Qwen/Qwen3-4B-Thinking-2507|1|0,1|2|1|1"
-    "KMEANS|0|0|0 |INT4|Qwen/Qwen3-4B-Thinking-2507|16|2,3|2|1|1"
-    "KMEANS|0|0|0 |INT4|Qwen/Qwen3-4B-Thinking-2507|256|4,5|2|1|1"
-    "KMEANS|0|0|0 |INT4|Qwen/Qwen3-4B-Thinking-2507|2048|6,7|2|1|1"
+    "KMEANS|0|0|0 |INT4|Qwen/Qwen3-4B-Thinking-2507|1|0,1,2,3,4,5,6,7|2|1|4"
+    "KMEANS|0|0|0 |INT4|Qwen/Qwen3-4B-Thinking-2507|16|0,1,2,3,4,5,6,7|2|1|4"
+    "KMEANS|0|0|0 |INT4|Qwen/Qwen3-4B-Thinking-2507|256|0,1,2,3,4,5,6,7|2|1|4"
+    "KMEANS|0|0|0 |INT4|Qwen/Qwen3-4B-Thinking-2507|2048|0,1,2,3,4,5,6,7|2|1|4"
 
-    "KMEANS|0|0|0 |INT4|Qwen/Qwen3-8B|1|0,1|2|1|1"
-    "KMEANS|0|0|0 |INT4|Qwen/Qwen3-8B|16|2,3|2|1|1"
-    "KMEANS|0|0|0 |INT4|Qwen/Qwen3-8B|256|4,5|2|1|1"
-    "KMEANS|0|0|0 |INT4|Qwen/Qwen3-8B|2048|6,7|2|1|1"
+    "KMEANS|0|0|0 |INT4|Qwen/Qwen3-8B|1|0,1,2,3,4,5,6,7|2|1|4"
+    "KMEANS|0|0|0 |INT4|Qwen/Qwen3-8B|16|0,1,2,3,4,5,6,7|2|1|4"
+    "KMEANS|0|0|0 |INT4|Qwen/Qwen3-8B|256|0,1,2,3,4,5,6,7|2|1|4"
+    "KMEANS|0|0|0 |INT4|Qwen/Qwen3-8B|2048|0,1,2,3,4,5,6,7|2|1|4"
 
-    "KMEANS|0|0|0 |INT4|Qwen/Qwen3-32B|1|0,1|2|1|1"
-    "KMEANS|0|0|0 |INT4|Qwen/Qwen3-32B|16|2,3|2|1|1"
-    "KMEANS|0|0|0 |INT4|Qwen/Qwen3-32B|256|4,5|2|1|1"
-    "KMEANS|0|0|0 |INT4|Qwen/Qwen3-32B|2048|6,7|2|1|1"
+    "KMEANS|0|0|0 |INT4|Qwen/Qwen3-32B|1|0,1,2,3,4,5,6,7|2|1|4"
+    "KMEANS|0|0|0 |INT4|Qwen/Qwen3-32B|16|0,1,2,3,4,5,6,7|2|1|4"
+    "KMEANS|0|0|0 |INT4|Qwen/Qwen3-32B|256|0,1,2,3,4,5,6,7|2|1|4"
+    "KMEANS|0|0|0 |INT4|Qwen/Qwen3-32B|2048|0,1,2,3,4,5,6,7|2|1|4"
 
     "KMEANS|0|0|0 |INT4|zai-org/GLM-4.7-FP8|1|0,1,2,3,4,5,6,7|8|1|1"
     "KMEANS|0|0|0 |INT4|zai-org/GLM-4.7-FP8|16|0,1,2,3,4,5,6,7|8|1|1"
@@ -117,8 +118,8 @@ DUMP_TOKENS=20000
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TORE_SPEED_EVAL_DIR="$SCRIPT_DIR/tore-speed-eval"
-RESULTS_DIR="$SCRIPT_DIR/throughput_results"
-LOGS_DIR="$SCRIPT_DIR/throughput_logs"
+RESULTS_DIR="$SCRIPT_DIR/ttft_results"
+LOGS_DIR="$SCRIPT_DIR/ttft_logs"
 
 export HF_HOME=/data/shared/huggingface
 
@@ -127,7 +128,9 @@ CONDA_ENV_NAME="sglang_env"
 CONDA_ENV_DIR="$CONDA_BASE/envs/$CONDA_ENV_NAME"
 PYTHON="$CONDA_ENV_DIR/bin/python3"
 
-export TRITON_CACHE_DIR="/data/$USER/.triton/cache"
+export TRITON_CACHE_DIR="/dev/shm/triton_cache_$USER"
+export FLASHINFER_CACHE_DIR="/data/$USER/.cache/flashinfer"
+export SGLANG_DISABLE_FLASHINFER_TRTLLM_AR_FUSION=1
 
 GPU_FREE_MEM_MB="${GPU_FREE_MEM_MB:-500}"
 GPU_POLL_INTERVAL="${GPU_POLL_INTERVAL:-240}"
@@ -212,9 +215,9 @@ wait_for_gpus_free() {
     fi
 }
 
-# Convert token count to short label: 8192 → in8k, 16384 → in16k, 32768 → in32k
-input_len_label() { echo "in$((${1} / 1024))k"; }
-output_len_label() { echo "out$((${1} / 1024))k"; }
+# Convert token count to short label: 8192 → in8k, 16384 → in16k; small values kept as-is: 10 → out10
+input_len_label()  { local n=$((${1} / 1024)); [ "$n" -gt 0 ] && echo "in${n}k" || echo "in${1}"; }
+output_len_label() { local n=$((${1} / 1024)); [ "$n" -gt 0 ] && echo "out${n}k" || echo "out${1}"; }
 
 # =============================================================================
 # extract_per_request_stats
@@ -384,7 +387,7 @@ benchmark_single_model() {
     [[ "$mode" == "KMEANS" ]] && log_message "N_CLUSTERS=$n_clusters"
     log_message "Batch sizes:  ${BATCH_SIZES[*]}"
     log_message "Input lens:   ${INPUT_LENS[*]}"
-    log_message "Output lens:  ${OUTPUT_LENS[*]}  num_examples: ${NUM_EXAMPLES[*]}"
+    log_message "Output lens:  ${OUTPUT_LENS[*]}  num_examples: ${NUM_EXAMPLES}"
     log_message "Results dir:  $result_dir"
     log_message "=========================================="
 
@@ -437,6 +440,7 @@ benchmark_single_model() {
         --enable-request-time-stats-logging \
         --disable-radix-cache \
         --chunked-prefill-size 32768 \
+        --max-prefill-tokens 131072 \
         > "$server_log" 2>&1 &
     local server_pid=$!
     log_message "Server started (PID: $server_pid)"
@@ -471,7 +475,7 @@ benchmark_single_model() {
         --synthetic_output_length=128 \
         --stream=true \
         --temperature=1.0 \
-        --top_p=0.7 \
+        --top_p=0.95 \
         --num_gpus=1 \
         --concurrency=1 \
         --num_examples=8 \
@@ -485,8 +489,7 @@ benchmark_single_model() {
     # ------------------------------------------------------------------
     local stats_log="${result_dir}/per_request_stats.log"
     local overall_exit=0
-    for idx in "${!BATCH_SIZES[@]}"; do
-        bs="${BATCH_SIZES[$idx]}"
+    for bs in "${BATCH_SIZES[@]}"; do
         for input_len in "${INPUT_LENS[@]}"; do
             for output_len in "${OUTPUT_LENS[@]}"; do
                 local label_in label_out
@@ -504,7 +507,7 @@ benchmark_single_model() {
                 local log_line_before
                 log_line_before=$(wc -l < "$server_log" 2>/dev/null || echo 0)
 
-                local num_examples="${NUM_EXAMPLES[$idx]}"
+                local num_examples=$NUM_EXAMPLES
                 log_message "  BS=${bs}  input=${label_in}  output=${label_out}  examples=${num_examples}"
                 set +e
                 cd "$SCRIPT_DIR"
@@ -520,7 +523,7 @@ benchmark_single_model() {
                     --synthetic_output_length="$output_len" \
                     --stream=true \
                     --temperature=1.0 \
-                    --top_p=0.7 \
+                    --top_p=0.95 \
                     --num_gpus="$tp_size" \
                     --concurrency="$bs" \
                     --num_examples="$num_examples" \
@@ -673,11 +676,11 @@ for i in "${!MODEL_CONFIGS[@]}"; do
             wait "${PIDS[$i]}"
             EXIT_CODES[$i]=$?
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] Cooling down 60s for GPU memory to release..."
-            sleep 60 &
+            sleep 30 &
             wait $!
         else
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] No GPU overlap with next config, sleeping 60s before launching next..."
-            sleep 60 &
+            sleep 30 &
             wait $!
         fi
     fi

@@ -55,6 +55,10 @@ lm_eval --model local-completions --tasks mmlu_pro \
     --limit 16 \
     --model_args model=Qwen/Qwen3-4B-Thinking-2507,base_url=http://localhost:30001/v1/completions,max_model_len=20000,num_concurrent=32,max_retries=1,tokenized_requests=False
 
+lm_eval --model local-completions --tasks mmlu_pro \
+    --limit 16 \
+    --model_args model=Qwen/Qwen3-8B,base_url=http://localhost:30001/v1/completions,max_model_len=20000,num_concurrent=32,max_retries=1,tokenized_requests=False
+
 lm_eval --model local-chat-completions --tasks mmlu_pro \
       --limit 5 \
       --apply_chat_template \
