@@ -33,10 +33,10 @@ trap cleanup INT TERM
 # =============================================================================
 # Throughput Test Parameters
 # =============================================================================
-BATCH_SIZES=(1 8 16 32 256)
-INPUT_LENS=(8192)
-OUTPUT_LENS=(1024)
-NUM_EXAMPLES=(4 32 32 32 256)   # paired 1:1 with BATCH_SIZES
+BATCH_SIZES=(1 8 16 32 64 96 128 196 256)
+INPUT_LENS=(67)
+OUTPUT_LENS=(8125)
+NUM_EXAMPLES=(4 32 32 32 64 128 196 256)   # paired 1:1 with BATCH_SIZES
 
 # =============================================================================
 # Model Configs
@@ -65,9 +65,9 @@ MODEL_CONFIGS=(
     # "1|QUANT |1|0|128|INT4|zai-org/GLM-4.7-FP8|0|0,1,2,3,4,5,6,7|8|1|1"
     # "0|QUANT |1|0|16|INT4|Qwen/Qwen3-8B|0|2,3|2|1|1"
 
-    "0|BASE |0|0|0|BF16|Qwen/Qwen3-4B-Thinking-2507|0|0,1|2|1|1"
-    "0|BASE |0|0|0|INT4|Qwen/Qwen3-4B-Thinking-2507|0|2,3|2|1|1"
-    "0|QUANT |1|0|128|INT4|Qwen/Qwen3-4B-Thinking-2507|0|4,5|2|1|1"
+    "0|BASE |0|0|0|BF16|Qwen/Qwen3-4B-Thinking-2507|0|4,5|2|1|1"
+    # "0|BASE |0|0|0|INT4|Qwen/Qwen3-4B-Thinking-2507|0|2,3|2|1|1"
+    # "0|QUANT |1|0|128|INT4|Qwen/Qwen3-4B-Thinking-2507|0|4,5|2|1|1"
     "1|QUANT |1|0|128|INT4|Qwen/Qwen3-4B-Thinking-2507|0|6,7|2|1|1"
     # "0|BASE |0|0|0|BF16|Qwen/Qwen3-8B|0|0,1|2|1|1"
     # "0|BASE |0|0|0|INT4|Qwen/Qwen3-8B|0|2,3|2|1|1"
@@ -441,6 +441,7 @@ benchmark_single_model() {
         --enable-request-time-stats-logging \
         --disable-radix-cache \
         --chunked-prefill-size 32768 \
+        --max-running-requests 256 \
         > "$server_log" 2>&1 &
     local server_pid=$!
     log_message "Server started (PID: $server_pid)"
