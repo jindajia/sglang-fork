@@ -33,10 +33,10 @@ trap cleanup INT TERM
 # =============================================================================
 # Throughput Test Parameters
 # =============================================================================
-BATCH_SIZES=(  1   8  16  32)
+BATCH_SIZES=(1 8 16 32 256)
 INPUT_LENS=(8192)
 OUTPUT_LENS=(1024)
-NUM_EXAMPLES=( 4  32  32  32)   # paired 1:1 with BATCH_SIZES
+NUM_EXAMPLES=(4 32 32 32 256)   # paired 1:1 with BATCH_SIZES
 
 # =============================================================================
 # Model Configs
@@ -64,12 +64,27 @@ MODEL_CONFIGS=(
     # "0|QUANT |1|0|128|INT4|zai-org/GLM-4.7-FP8|0|0,1,2,3,4,5,6,7|8|1|1"
     # "1|QUANT |1|0|128|INT4|zai-org/GLM-4.7-FP8|0|0,1,2,3,4,5,6,7|8|1|1"
     # "0|QUANT |1|0|16|INT4|Qwen/Qwen3-8B|0|2,3|2|1|1"
-    "1|QUANT |1|0|16|INT4|Qwen/Qwen3-8B|0|0,1|2|1|1"
-    "1|QUANT |1|0|128|INT4|Qwen/Qwen3-8B|0|2,3|2|1|1"
-    "1|QUANT |1|0|16|INT4|Qwen/Qwen3-32B|0|4,5|2|1|1"
-    "1|QUANT |1|0|128|INT4|Qwen/Qwen3-32B|0|6,7|2|1|1"
-    "1|QUANT |1|0|16|INT4|zai-org/GLM-4.7-FP8|0|0,1,2,3,4,5,6,7|8|1|1"
-    "1|QUANT |1|0|128|INT4|zai-org/GLM-4.7-FP8|0|0,1,2,3,4,5,6,7|8|1|1"
+
+    "0|BASE |0|0|0|BF16|Qwen/Qwen3-4B-Thinking-2507|0|0,1|2|1|1"
+    "0|BASE |0|0|0|INT4|Qwen/Qwen3-4B-Thinking-2507|0|2,3|2|1|1"
+    "0|QUANT |1|0|128|INT4|Qwen/Qwen3-4B-Thinking-2507|0|4,5|2|1|1"
+    "1|QUANT |1|0|128|INT4|Qwen/Qwen3-4B-Thinking-2507|0|6,7|2|1|1"
+    # "0|BASE |0|0|0|BF16|Qwen/Qwen3-8B|0|0,1|2|1|1"
+    # "0|BASE |0|0|0|INT4|Qwen/Qwen3-8B|0|2,3|2|1|1"
+    # "1|QUANT |1|0|128|INT4|Qwen/Qwen3-8B|0|4,5|2|1|1"
+
+    # "0|BASE |0|0|0|BF16|Qwen/Qwen3-32B|0|6,7|2|1|1"
+    # "0|BASE |0|0|0|INT4|Qwen/Qwen3-32B|0|0,1|2|1|1"
+    # "1|QUANT |1|0|128|INT4|Qwen/Qwen3-32B|0|2,3|2|1|1"
+
+    # "0|BASE |0|0|0|BF16|zai-org/GLM-4.7-FP8|0|0,1,2,3,4,5,6,7|8|1|1"
+    # "0|BASE |0|0|0|INT4|zai-org/GLM-4.7-FP8|0|0,1,2,3,4,5,6,7|8|1|1"
+    # "1|QUANT |1|0|128|INT4|zai-org/GLM-4.7-FP8|0|0,1,2,3,4,5,6,7|8|1|1"
+
+    # "1|QUANT |1|0|16|INT4|Qwen/Qwen3-32B|0|4,5|2|1|1"
+    # "1|QUANT |1|0|128|INT4|Qwen/Qwen3-32B|0|6,7|2|1|1"
+    # "1|QUANT |1|0|16|INT4|zai-org/GLM-4.7-FP8|0|0,1,2,3,4,5,6,7|8|1|1"
+    # "1|QUANT |1|0|128|INT4|zai-org/GLM-4.7-FP8|0|0,1,2,3,4,5,6,7|8|1|1"
 )
 
 # =============================================================================
@@ -80,12 +95,13 @@ declare -A MODEL_NUM_LAYERS=(
     ["Qwen/Qwen3-8B"]=36
     ["Qwen/Qwen3-32B"]=64
     ["zai-org/GLM-4.7-FP8"]=92
+    ["Qwen/Qwen3-4B-Thinking-2507"]=36
 )
 
 # =============================================================================
 # Server & Path Config
 # =============================================================================
-BASE_PORT=30200
+BASE_PORT=30700
 
 # Base directory for KV dump files and centroids (KMEANS mode only)
 KV_DUMP_BASE="${KV_DUMP_BASE:-/data/$USER/kv-cache}"
@@ -193,8 +209,8 @@ wait_for_gpus_free() {
 }
 
 # Convert token count to short label: 8192 → in8k, 16384 → in16k, 32768 → in32k
-input_len_label()  { echo "in$((${1} / 1024))k"; }
-output_len_label() { echo "out$((${1} / 1024))k"; }
+input_len_label()  { local n=$((${1} / 1024)); [ "$n" -gt 0 ] && echo "in${n}k" || echo "in${1}"; }
+output_len_label() { local n=$((${1} / 1024)); [ "$n" -gt 0 ] && echo "out${n}k" || echo "out${1}"; }
 
 # =============================================================================
 # extract_per_request_stats
@@ -340,7 +356,7 @@ benchmark_single_model() {
     esac
 
     local kv_dtype_lower="${kv_dtype,,}"
-    local fuse_suffix; fuse_suffix=$([[ "$fuse_hadamard" == "1" ]] && echo "fused_finetuned" || echo "unfused")
+    local fuse_suffix; fuse_suffix=$([[ "$fuse_hadamard" == "1" ]] && echo "fused_finetuned_v2" || echo "unfused")
     local rot_suffix
     if [[ "$mode" == "BASE" ]]; then
         rot_suffix="baseline_${kv_dtype_lower}"
@@ -416,6 +432,7 @@ benchmark_single_model() {
         --tensor-parallel-size "$tp_size" \
         --expert-parallel-size "$ep_size" \
         --data-parallel-size "$dp_size" \
+        --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 119}' \
         --host 0.0.0.0 \
         --port "$server_port" \
         --trust-remote-code \
@@ -616,7 +633,7 @@ for i in "${!MODEL_CONFIGS[@]}"; do
 
     model_short="$(extract_model_short_name "$model_name")"
     kv_dtype_lower="${kv_dtype,,}"
-    fuse_suffix=$([[ "$fuse_hadamard" == "1" ]] && echo "fused_finetuned" || echo "unfused")
+    fuse_suffix=$([[ "$fuse_hadamard" == "1" ]] && echo "fused_finetuned_v2" || echo "unfused")
     if [[ "$mode" == "BASE" ]]; then
         rot_suffix="baseline_${kv_dtype_lower}"
     elif [[ "$mode" == "QUANT" ]]; then

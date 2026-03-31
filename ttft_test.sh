@@ -62,16 +62,20 @@ MODEL_CONFIGS=(
     # Baseline BF16 KV
     # "0|BASE  |0|0|0  |BF16|Qwen/Qwen3-8B|0|0,1,2,3,4,5,6,7|2|1|4"
     # "0|BASE  |0|0|0  |INT4|Qwen/Qwen3-8B|0|0,1,2,3,4,5,6,7|2|1|4"
-    "1|QUANT |1|0|16|INT4|Qwen/Qwen3-8B|0|0,1,2,3,4,5,6,7|2|1|4"
-    "1|QUANT |1|0|128|INT4|Qwen/Qwen3-8B|0|0,1,2,3,4,5,6,7|2|1|4"
+    # "1|QUANT |1|0|16|INT4|Qwen/Qwen3-8B|0|0,1,2,3,4,5,6,7|2|1|4"
+    # "1|QUANT |1|0|128|INT4|Qwen/Qwen3-8B|0|0,1,2,3,4,5,6,7|2|1|4"
     # "0|BASE  |0|0|0  |BF16|Qwen/Qwen3-32B|0|0,1,2,3,4,5,6,7|2|1|4"
     # "0|BASE  |0|0|0  |INT4|Qwen/Qwen3-32B|0|0,1,2,3,4,5,6,7|2|1|4"
-    "1|QUANT |1|0|16|INT4|Qwen/Qwen3-32B|0|0,1,2,3,4,5,6,7|2|1|4"
-    "1|QUANT |1|0|128|INT4|Qwen/Qwen3-32B|0|0,1,2,3,4,5,6,7|2|1|4"
+    # "1|QUANT |1|0|16|INT4|Qwen/Qwen3-32B|0|0,1,2,3,4,5,6,7|2|1|4"
+    # "1|QUANT |1|0|128|INT4|Qwen/Qwen3-32B|0|0,1,2,3,4,5,6,7|2|1|4"
     # "0|BASE  |0|0|0  |BF16|zai-org/GLM-4.7-FP8|0|0,1,2,3,4,5,6,7|8|1|1"
     # "0|BASE  |0|0|0  |INT4|zai-org/GLM-4.7-FP8|0|0,1,2,3,4,5,6,7|8|1|1"
-    "1|QUANT |1|0|16|INT4|zai-org/GLM-4.7-FP8|0|0,1,2,3,4,5,6,7|8|1|1"
-    "1|QUANT |1|0|128|INT4|zai-org/GLM-4.7-FP8|0|0,1,2,3,4,5,6,7|8|1|1"
+    # "1|QUANT |1|0|16|INT4|zai-org/GLM-4.7-FP8|0|0,1,2,3,4,5,6,7|8|1|1"
+    # "1|QUANT |1|0|128|INT4|zai-org/GLM-4.7-FP8|0|0,1,2,3,4,5,6,7|8|1|1"
+    "0|BASE |0|0|0|BF16|Qwen/Qwen3-4B-Thinking-2507|0|0,1,2,3,4,5,6,7|2|1|4"
+    "0|BASE |0|0|0|INT4|Qwen/Qwen3-4B-Thinking-2507|0|0,1,2,3,4,5,6,7|2|1|4"
+    "1|QUANT |1|0|128|INT4|Qwen/Qwen3-4B-Thinking-2507|0|0,1,2,3,4,5,6,7|2|1|4"
+    "0|QUANT |1|0|128|INT4|Qwen/Qwen3-4B-Thinking-2507|0|0,1,2,3,4,5,6,7|2|1|4"
 )
 
 # =============================================================================
@@ -82,12 +86,13 @@ declare -A MODEL_NUM_LAYERS=(
     ["Qwen/Qwen3-8B"]=36
     ["Qwen/Qwen3-32B"]=64
     ["zai-org/GLM-4.7-FP8"]=92
+    ["Qwen/Qwen3-4B-Thinking-2507"]=36
 )
 
 # =============================================================================
 # Server & Path Config
 # =============================================================================
-BASE_PORT=30200
+BASE_PORT=30600
 
 # Base directory for KV dump files and centroids (KMEANS mode only)
 KV_DUMP_BASE="${KV_DUMP_BASE:-/data/$USER/kv-cache}"
@@ -342,7 +347,7 @@ benchmark_single_model() {
     esac
 
     local kv_dtype_lower="${kv_dtype,,}"
-    local fuse_suffix; fuse_suffix=$([[ "$fuse_hadamard" == "1" ]] && echo "fused_finetuned" || echo "unfused")
+    local fuse_suffix; fuse_suffix=$([[ "$fuse_hadamard" == "1" ]] && echo "fused_finetuned_v2" || echo "unfused")
     local rot_suffix
     if [[ "$mode" == "BASE" ]]; then
         rot_suffix="baseline_${kv_dtype_lower}"
@@ -618,7 +623,7 @@ for i in "${!MODEL_CONFIGS[@]}"; do
 
     model_short="$(extract_model_short_name "$model_name")"
     kv_dtype_lower="${kv_dtype,,}"
-    fuse_suffix=$([[ "$fuse_hadamard" == "1" ]] && echo "fused_finetuned" || echo "unfused")
+    fuse_suffix=$([[ "$fuse_hadamard" == "1" ]] && echo "fused_finetuned_v2" || echo "unfused")
     if [[ "$mode" == "BASE" ]]; then
         rot_suffix="baseline_${kv_dtype_lower}"
     elif [[ "$mode" == "QUANT" ]]; then

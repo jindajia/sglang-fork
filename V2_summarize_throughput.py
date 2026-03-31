@@ -31,21 +31,15 @@ def load_metrics(csv_path: Path):
             reader = csv.DictReader(f)
             for row in reader:
                 return {
-                    "otps_mean":          _f(row, "user_tps_mean"),
-                    "otps_std":           _f(row, "user_tps_stdev"),
-                    "otps_p05":           _f(row, "user_tps_p05"),
-                    "otps_p50":           _f(row, "user_tps_p50"),
-                    "otps_p80":           _f(row, "user_tps_p80"),
-                    "otps_p95":           _f(row, "user_tps_p95"),
-                    "otps_p99":           _f(row, "user_tps_p99"),
-                    "ttft_mean":          _f(row, "ttft_mean"),
-                    "ttft_std":           _f(row, "ttft_stdev"),
-                    "elapsed_s":          _f(row, "summary_total_elapsed_time_s"),
-                    "job_level_tps":      _f(row, "summary_job_level_tps"),
-                    "actual_qps":         _f(row, "summary_actual_qps"),
-                    "per_gpu_num_gpus":   _f(row, "per_gpu_num_gpus"),
-                    "per_gpu_tps_mean":   _f(row, "per_gpu_tps_mean"),
-                    "per_gpu_tps_stdev":  _f(row, "per_gpu_tps_stdev"),
+                    "input_tokens":      _f(row, "input_avg_len"),
+                    "output_tokens":     _f(row, "output_avg_len"),
+                    "ttft_s":            _f(row, "ttft_mean"),
+                    "e2e_s":             _f(row, "e2e_mean"),
+                    "job_level_tps":     _f(row, "summary_job_level_tps"),
+                    "otps":              _f(row, "user_tps_mean"),
+                    "actual_qps":        _f(row, "summary_actual_qps"),
+                    "per_gpu_tps_mean":  _f(row, "per_gpu_tps_mean"),
+                    "per_gpu_tps_stdev": _f(row, "per_gpu_tps_stdev"),
                 }
     except Exception as exc:
         print(f"  WARNING: cannot read {csv_path}: {exc}", file=sys.stderr)
@@ -95,36 +89,28 @@ def render_config_table(config_dir: Path) -> str:
 
     rows_data.sort(key=sort_key)
 
-    header = ("| BS | Shape "
-              "| OTPS±stdev | OTPS_p05 | OTPS_p50 | OTPS_p80 | OTPS_p95 | OTPS_p99 "
-              "| TTFT±stdev "
-              "| elapsed_s | job_tps | actual_qps "
-              "| gpus | per_gpu_tps±stdev |")
-    sep    = ("|----|-------"
-              "|------------|----------|----------|----------|----------|----------"
-              "|------------"
-              "|-----------|---------|------------"
-              "|------|-------------------|")
+    header = ("| batch_size | input_tokens | output_tokens "
+              "| ttft_s | e2e_s | job_level_tps | otps | actual_qps "
+              "| per_gpu_tps_mean | per_gpu_tps_stdev |")
+    sep    = ("|------------|--------------|---------------"
+              "|--------|-------|---------------|------|------------"
+              "|------------------|-------------------|")
     lines  = [header, sep]
 
     for bs, shape, m in rows_data:
         if m is None:
             m = {}
-        gpus = int(m["per_gpu_num_gpus"]) if m.get("per_gpu_num_gpus") is not None else None
         lines.append(
-            f"| {bs} | {shape} "
-            f"| {fmt(m.get('otps_mean'), m.get('otps_std'))} "
-            f"| {fv(m.get('otps_p05'))} "
-            f"| {fv(m.get('otps_p50'))} "
-            f"| {fv(m.get('otps_p80'))} "
-            f"| {fv(m.get('otps_p95'))} "
-            f"| {fv(m.get('otps_p99'))} "
-            f"| {fmt(m.get('ttft_mean'), m.get('ttft_std'))} "
-            f"| {fv(m.get('elapsed_s'))} "
-            f"| {fv(m.get('job_level_tps'))} "
-            f"| {fv(m.get('actual_qps'))} "
-            f"| {'—' if gpus is None else gpus} "
-            f"| {fmt(m.get('per_gpu_tps_mean'), m.get('per_gpu_tps_stdev'))} |"
+            f"| {bs} "
+            f"| {fv(m.get('input_tokens'), 0)} "
+            f"| {fv(m.get('output_tokens'), 0)} "
+            f"| {fv(m.get('ttft_s'), 1)} "
+            f"| {fv(m.get('e2e_s'), 1)} "
+            f"| {fv(m.get('job_level_tps'), 1)} "
+            f"| {fv(m.get('otps'), 1)} "
+            f"| {fv(m.get('actual_qps'), 3)} "
+            f"| {fv(m.get('per_gpu_tps_mean'), 1)} "
+            f"| {fv(m.get('per_gpu_tps_stdev'), 1)} |"
         )
     return "\n".join(lines)
 
@@ -162,10 +148,11 @@ def main():
     lines = [
         "# Throughput Benchmark",
         "",
-        "> **OTPS**: per-request output tokens/s (`user_tps_mean`)  ",
-        "> **TTFT**: time to first token in ms (`ttft_mean`)  ",
-        "> **job_tps**: total output tokens / total elapsed time  ",
-        "> **per_gpu_tps**: job_tps normalized per GPU  ",
+        "> **ttft_s**: time to first token in ms (`ttft_mean`)  ",
+        "> **e2e_s**: end-to-end latency in ms (`e2e_mean`)  ",
+        "> **job_level_tps**: total output tokens / total elapsed time  ",
+        "> **otps**: per-request output tokens/s (`user_tps_mean`)  ",
+        "> **per_gpu_tps**: job_level_tps normalized per GPU  ",
         "",
     ]
 
