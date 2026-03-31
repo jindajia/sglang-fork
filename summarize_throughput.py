@@ -1,203 +1,146 @@
 #!/usr/bin/env python3
 """
-summarize_throughput.py
-Auto-discover configs / batch-sizes / input-output lengths from the results
-directory and render a Markdown report with all available metrics.
+summarize_throughput.py — Summarize throughput results from throughput_results CSVs into Markdown.
 
 Usage:
-    python3 summarize_throughput.py [--results_dir PATH] [--output FILE]
-
-Defaults:
-    --results_dir  throughput_results/Qwen3-8B
-    --output       throughput_summary.md
+    python summarize_throughput.py [--results-dir throughput_results] [--model MODEL] [--output FILE]
 """
 
 import argparse
 import csv
-import re
 import sys
 from pathlib import Path
 
-# Config order and display names.
-# Only configs whose subdirectory exists will be rendered.
-CONFIGS = [
-    ("baseline_bf16",       "BF16"),
-    ("baseline_int4",       "INT4"),
-    ("quant_int4_1_0_16",   "INT4 + R16 (k)"),
-    ("quant_int4_1_0_64",   "INT4 + R64 (k)"),
-    ("quant_int4_1_0_128",  "INT4 + R128 (k)"),
-    ("quant_int4_1_0_512",  "INT4 + R512 (k)"),
-    ("quant_int4_1_0_1024", "INT4 + R1024 (k)"),
-    ("quant_int4_1_1_16",   "INT4 + R16 (kv)"),
-    ("quant_int4_1_1_64",   "INT4 + R64 (kv)"),
-    ("quant_int4_1_1_128",  "INT4 + R128 (kv)"),
-]
 
-# Metric families to report, in display order.
-# Each entry: (family_key, display_name, unit, stat_suffixes)
-# Only stats that actually exist in the CSV will be shown.
-METRIC_FAMILIES = [
-    ("user_tps", "OTPS",  "tok/s", ["mean"]),
-    ("ttft",     "TTFT",  "ms",    ["mean", "p05", "p50", "p80", "p95", "p99"]),
-]
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument("--results-dir", default="throughput_results")
+    p.add_argument("--model", default=None, help="Filter by model name (e.g. GLM-4.7-FP8)")
+    p.add_argument("--output", default="throughput_summary.md")
+    return p.parse_args()
 
 
-def load_row(csv_path: Path) -> dict:
-    """Return the first data row as a dict, or {}."""
-    if not csv_path.exists():
-        return {}
+def read_csv(path):
+    with open(path) as f:
+        rows = list(csv.DictReader(f))
+    return rows[0] if rows else None
+
+
+def fmt(val, decimals=1):
     try:
-        with open(csv_path, newline="") as f:
-            for row in csv.DictReader(f):
-                return {k: v for k, v in row.items() if v.strip() != ""}
-    except Exception as exc:
-        print(f"  WARNING: cannot read {csv_path}: {exc}", file=sys.stderr)
-    return {}
-
-
-def fval(row: dict, key: str) -> str:
-    v = row.get(key)
-    if v is None:
-        return "—"
-    try:
-        f = float(v)
-        return f"{f:.1f}"
-    except ValueError:
+        return f"{float(val):.{decimals}f}"
+    except (ValueError, TypeError):
         return "—"
 
-
-def discover_results(results_dir: Path):
-    """
-    Returns:
-        run_keys  : sorted list of (bs, in_label, out_label) tuples
-        csv_map   : dict[(rot_suffix, bs, in_label, out_label)] -> Path
-    Scans only the CONFIGS subdirectories.
-    """
-    csv_map = {}
-    run_keys_set = set()
-
-    pattern = re.compile(r"^bs(\d+)_(in\w+)_(out\w+)\.csv$")
-    for rot_suffix, _ in CONFIGS:
-        config_dir = results_dir / rot_suffix
-        if not config_dir.is_dir():
-            continue
-        for f in config_dir.glob("bs*.csv"):
-            m = pattern.match(f.name)
-            if not m:
-                continue
-            bs        = int(m.group(1))
-            in_label  = m.group(2)
-            out_label = m.group(3)
-            csv_map[(rot_suffix, bs, in_label, out_label)] = f
-            run_keys_set.add((bs, in_label, out_label))
-
-    def sort_key(t):
-        bs, in_l, out_l = t
-        in_num  = int(re.sub(r"\D", "", in_l)  or 0)
-        out_num = int(re.sub(r"\D", "", out_l) or 0)
-        return (in_num, bs, out_num)
-
-    run_keys = sorted(run_keys_set, key=sort_key)
-    return run_keys, csv_map
-
-
-def detect_active_columns(run_keys, csv_map):
-    """
-    Sample all available CSVs to find which metric columns actually have data.
-    Returns list of (col_header, csv_key) tuples to use as table columns.
-    """
-    all_keys = set()
-    for rot_suffix, _ in CONFIGS:
-        for (bs, in_l, out_l) in run_keys:
-            path = csv_map.get((rot_suffix, bs, in_l, out_l))
-            if path:
-                row = load_row(path)
-                all_keys.update(row.keys())
-
-    active = []
-    for family_key, display_name, unit, stats in METRIC_FAMILIES:
-        for stat in stats:
-            csv_key = f"{family_key}_{stat}"
-            if csv_key in all_keys:
-                label = f"{display_name}_{stat}"
-                if unit:
-                    label += f" ({unit})"
-                active.append((label, csv_key))
-    return active
-
-
-def render_config_table(rot_suffix: str, run_keys, csv_map, active_cols) -> str:
-    col_headers = ["BS", "Input", "Output"] + [h for h, _ in active_cols]
-    widths = [max(4, len(h)) for h in col_headers]
-
-    rows_data = []
-    for (bs, in_l, out_l) in run_keys:
-        path = csv_map.get((rot_suffix, bs, in_l, out_l))
-        row = load_row(path) if path else {}
-        cells = [str(bs), in_l, out_l] + [fval(row, k) for _, k in active_cols]
-        rows_data.append(cells)
-        for i, c in enumerate(cells):
-            widths[i] = max(widths[i], len(c))
-
-    def fmt_row(cells):
-        return "| " + " | ".join(c.ljust(widths[i]) for i, c in enumerate(cells)) + " |"
-
-    sep = "|-" + "-|-".join("-" * w for w in widths) + "-|"
-    lines = [fmt_row(col_headers), sep]
-    for cells in rows_data:
-        lines.append(fmt_row(cells))
-    return "\n".join(lines)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Summarize throughput results to Markdown")
-    parser.add_argument(
-        "--results_dir",
-        default="throughput_results/Qwen3-8B",
-        help="Path to the model's results directory",
-    )
-    parser.add_argument(
-        "--output",
-        default="throughput_summary.md",
-        help="Output Markdown file (default: throughput_summary.md)",
-    )
-    args = parser.parse_args()
-
+    args = parse_args()
     results_dir = Path(args.results_dir)
     if not results_dir.exists():
-        print(f"ERROR: results_dir not found: {results_dir}", file=sys.stderr)
+        print(f"ERROR: {results_dir} not found", file=sys.stderr)
         sys.exit(1)
 
-    run_keys, csv_map = discover_results(results_dir)
+    # Collect all rows
+    rows = []
+    for model_dir in sorted(results_dir.iterdir()):
+        if not model_dir.is_dir():
+            continue
+        if args.model and args.model not in model_dir.name:
+            continue
+        for config_dir in sorted(model_dir.iterdir()):
+            if not config_dir.is_dir():
+                continue
+            for csv_path in sorted(config_dir.glob("bs*_in8k_out1k.csv")):
+                stem = csv_path.stem  # e.g. bs16_in8k_out1k
+                parts = stem.split("_")
+                bs        = parts[0][2:]
+                in_label  = parts[1][2:]
 
-    if not run_keys:
-        print(f"ERROR: no CSV files matching bs*_in*_out*.csv found under {results_dir}", file=sys.stderr)
-        sys.exit(1)
+                row = read_csv(csv_path)
+                if row is None:
+                    continue
 
-    active_cols = detect_active_columns(run_keys, csv_map)
+                rows.append({
+                    "model":           model_dir.name,
+                    "config":          config_dir.name,
+                    "bs":              int(bs),
+                    "input":           in_label,
+                    "otps_mean":       row.get("user_tps_mean", ""),
+                    "otps_stdev":      row.get("user_tps_stdev", ""),
+                    "otps_p05":        row.get("user_tps_p05", ""),
+                    "otps_p50":        row.get("user_tps_p50", ""),
+                    "otps_p80":        row.get("user_tps_p80", ""),
+                    "otps_p95":        row.get("user_tps_p95", ""),
+                    "otps_p99":        row.get("user_tps_p99", ""),
+                    "ttft_mean":       row.get("ttft_mean", ""),
+                    "ttft_stdev":      row.get("ttft_stdev", ""),
+                    "elapsed":         row.get("summary_total_elapsed_time_s", ""),
+                    "total_tps":       row.get("summary_job_level_tps", ""),
+                    "actual_qps":      row.get("summary_actual_qps", ""),
+                    "per_gpu_num":     row.get("per_gpu_num_gpus", ""),
+                    "per_gpu_mean":    row.get("per_gpu_tps_mean", ""),
+                    "per_gpu_stdev":   row.get("per_gpu_tps_stdev", ""),
+                })
 
-    model_name = results_dir.name
-    present = [s for s, _ in CONFIGS if (results_dir / s).is_dir()]
-    lines = [
-        f"# Throughput Benchmark — {model_name}",
-        "",
-        f"Configs: {', '.join(present)}  ",
-        f"Run combinations: {len(run_keys)}  ",
+    if not rows:
+        print("No CSV results found.")
+        return
+
+    rows.sort(key=lambda r: (r["model"], r["config"], r["bs"]))
+
+    # Group by model → config, render one table per config
+    lines = ["# Throughput Benchmark Summary", ""]
+    lines += [
+        "> **OTPS**: per-request output tokens/s (`user_tps_mean ± stdev`)  ",
+        "> **TOTAL_TPS**: job-level throughput (`summary_job_level_tps`)  ",
+        "> **TTFT**: time to first token in ms  ",
         "",
     ]
 
-    for rot_suffix, display_name in CONFIGS:
-        config_dir = results_dir / rot_suffix
-        if not config_dir.is_dir():
-            continue
-        lines.append(f"## {display_name}")
-        lines.append(f"`{rot_suffix}`")
-        lines.append("")
-        lines.append(render_config_table(rot_suffix, run_keys, csv_map, active_cols))
-        lines.append("")
+    md_header = "| BS | OTPS ± stdev | OTPS_p05 | OTPS_p50 | OTPS_p80 | OTPS_p95 | OTPS_p99 | TTFT mean ± stdev (ms) | elapsed_s | TOTAL_TPS | actual_QPS | GPUs | per_GPU_TPS ± stdev |"
+    md_sep    = "|----|-------------|----------|----------|----------|----------|----------|------------------------|-----------|-----------|------------|------|---------------------|"
+
+    current_model = None
+    current_config = None
+    table_rows = []
+
+    def flush_table():
+        if table_rows:
+            lines.append(md_header)
+            lines.append(md_sep)
+            lines.extend(table_rows)
+            lines.append("")
+
+    for r in rows:
+        if r["model"] != current_model:
+            flush_table()
+            table_rows = []
+            current_config = None
+            current_model = r["model"]
+            lines.append(f"## {r['model']}")
+            lines.append("")
+
+        if r["config"] != current_config:
+            flush_table()
+            table_rows = []
+            current_config = r["config"]
+            lines.append(f"### {r['config']}")
+            lines.append("")
+
+        otps_str     = f"{fmt(r['otps_mean'])} ± {fmt(r['otps_stdev'])}"
+        ttft_str     = f"{fmt(r['ttft_mean'])} ± {fmt(r['ttft_stdev'])}"
+        per_gpu_str  = f"{fmt(r['per_gpu_mean'])} ± {fmt(r['per_gpu_stdev'])}"
+        table_rows.append(
+            f"| {r['bs']} | {otps_str} | {fmt(r['otps_p05'])} | {fmt(r['otps_p50'])} |"
+            f" {fmt(r['otps_p80'])} | {fmt(r['otps_p95'])} | {fmt(r['otps_p99'])} |"
+            f" {ttft_str} | {fmt(r['elapsed'])} | {fmt(r['total_tps'])} |"
+            f" {fmt(r['actual_qps'], 3)} | {fmt(r['per_gpu_num'], 0)} | {per_gpu_str} |"
+        )
+
+    flush_table()
 
     md = "\n".join(lines)
-
     output_path = Path(args.output)
     with open(output_path, "w") as f:
         f.write(md)

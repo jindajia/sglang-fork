@@ -96,10 +96,11 @@ MODEL_CONFIGS=(
     # "KMEANS|1|0|128 |INT4|Qwen/Qwen3-4B-Thinking-2507|256      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|4,5      |2  |1  |1  |${TASKS_ALL}"
     # "KMEANS|1|0|128 |INT4|Qwen/Qwen3-4B-Thinking-2507|2048      |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|6,7      |2  |1  |1  |${TASKS_ONCE}"
     # kmeans c=2048 gpqa rerun
-    "KMEANS|1|0|128 |INT4|Qwen/Qwen3-8B|1 |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|0,1  |2  |1  |1  |${TASKS_ALL}"
-    "KMEANS|1|0|128 |INT4|Qwen/Qwen3-8B|16 |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|2,3  |2  |1  |1  |${TASKS_ALL}"
-    "KMEANS|1|0|128 |INT4|Qwen/Qwen3-8B|256 |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|4,5  |2  |1  |1  |${TASKS_ALL}"
-    "KMEANS|1|0|128 |INT4|Qwen/Qwen3-8B|2048 |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|6,7  |2  |1  |1  |${TASKS_ALL}"
+    # "KMEANS|1|0|128 |INT4|Qwen/Qwen3-8B|1 |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|0,1  |2  |1  |1  |${TASKS_ALL}"
+    # "KMEANS|1|0|128 |INT4|Qwen/Qwen3-8B|16 |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|2,3  |2  |1  |1  |${TASKS_ALL}"
+    # "KMEANS|1|0|128 |INT4|Qwen/Qwen3-8B|256 |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|4,5  |2  |1  |1  |${TASKS_ALL}"
+    # "KMEANS|1|0|128 |INT4|Qwen/Qwen3-8B|2048 |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|2,3  |2  |1  |1  |customized_livecodebench_think:3"
+    "KMEANS|0|0|0 |INT4|Qwen/Qwen3-8B|2048 |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|2,3  |2  |1  |1  |customized_livecodebench_think:3"
     # R3 (ho=128) rerun
     # "KMEANS|1|0|128 |INT4|Qwen/Qwen3-4B-Thinking-2507|2048 |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|0,1  |2  |1  |1  |math_500_think:5,aime25_think:5"
     # "KMEANS|1|0|128 |INT4|Qwen/Qwen3-4B-Thinking-2507|2048 |0,1,2,3  |4  |1  |1  |0,1,2,3,4,5,6,7|2,3  |2  |1  |1  |gpqa_think:5,humaneval_think:5"
@@ -141,8 +142,8 @@ KV_DUMP_BASE="${KV_DUMP_BASE:-/data/$USER/kv-cache}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TORE_EVAL_DIR="$SCRIPT_DIR/tore-eval"
-RESULTS_DIR="$SCRIPT_DIR/eval_results"
-LOGS_DIR="$SCRIPT_DIR/eval_logs"
+RESULTS_DIR="$SCRIPT_DIR/eval_results_2"
+LOGS_DIR="$SCRIPT_DIR/eval_logs_2"
 
 export HF_HOME=/data/shared/huggingface
 # Load HF token for private dataset access

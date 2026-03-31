@@ -73,13 +73,13 @@ MODEL_CONFIGS=(
     # "QUANT |1|0|1024 |INT4|Qwen/Qwen3-4B-Thinking-2507|0|6|1|1|1"
     # ---- KMEANS examples (uncomment and fill n_clusters as needed) -----------
     # "KMEANS|0|0|0 |INT4|Qwen/Qwen3-4B-Thinking-2507|1|0,1|2|1|1"
-    # "KMEANS|0|0|0 |INT4|Qwen/Qwen3-4B-Thinking-2507|16|2,3|2|1|1"
-    # "KMEANS|0|0|0 |INT4|Qwen/Qwen3-4B-Thinking-2507|256|4,5|2|1|1"
+    "KMEANS|0|0|0 |INT4|Qwen/Qwen3-4B-Thinking-2507|16|0,1|2|1|1"
+    "KMEANS|0|0|0 |INT4|Qwen/Qwen3-4B-Thinking-2507|256|2,3|2|1|1"
     # "KMEANS|0|0|0 |INT4|Qwen/Qwen3-4B-Thinking-2507|2048|6,7|2|1|1"
 
     # "KMEANS|0|0|0 |INT4|Qwen/Qwen3-8B|1|0,1|2|1|1"
-    # "KMEANS|0|0|0 |INT4|Qwen/Qwen3-8B|16|2,3|2|1|1"
-    # "KMEANS|0|0|0 |INT4|Qwen/Qwen3-8B|256|4,5|2|1|1"
+    "KMEANS|0|0|0 |INT4|Qwen/Qwen3-8B|16|4,5|2|1|1"
+    "KMEANS|0|0|0 |INT4|Qwen/Qwen3-8B|256|6,7|2|1|1"
     # "KMEANS|0|0|0 |INT4|Qwen/Qwen3-8B|2048|6,7|2|1|1"
 
     # "KMEANS|0|0|0 |INT4|Qwen/Qwen3-32B|1|0,1|2|1|1"
@@ -87,10 +87,10 @@ MODEL_CONFIGS=(
     # "KMEANS|0|0|0 |INT4|Qwen/Qwen3-32B|256|4,5|2|1|1"
     # "KMEANS|0|0|0 |INT4|Qwen/Qwen3-32B|2048|6,7|2|1|1"
 
-    "KMEANS|0|0|0 |INT4|zai-org/GLM-4.7-FP8|1|0,1,2,3,4,5,6,7|8|1|1"
-    "KMEANS|0|0|0 |INT4|zai-org/GLM-4.7-FP8|16|0,1,2,3,4,5,6,7|8|1|1"
-    "KMEANS|0|0|0 |INT4|zai-org/GLM-4.7-FP8|256|0,1,2,3,4,5,6,7|8|1|1"
-    "KMEANS|0|0|0 |INT4|zai-org/GLM-4.7-FP8|2048|0,1,2,3,4,5,6,7|8|1|1"
+    # "KMEANS|0|0|0 |INT4|zai-org/GLM-4.7-FP8|1|0,1,2,3,4,5,6,7|8|1|1"
+    # "KMEANS|0|0|0 |INT4|zai-org/GLM-4.7-FP8|16|0,1,2,3,4,5,6,7|8|1|1"
+    # "KMEANS|0|0|0 |INT4|zai-org/GLM-4.7-FP8|256|0,1,2,3,4,5,6,7|8|1|1"
+    # "KMEANS|0|0|0 |INT4|zai-org/GLM-4.7-FP8|2048|0,1,2,3,4,5,6,7|8|1|1"
 )
 
 # =============================================================================
