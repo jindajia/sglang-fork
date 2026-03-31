@@ -55,10 +55,10 @@ NUM_EXAMPLES=32
 #
 MODEL_CONFIGS=(
     # mode         |rk|rv|ho |dtype|model                          |q_rotation_path                                                                     |gpu|tp|ep|dp
-    "Rotation_QR   |1 |0 |16 |INT4 |Qwen/Qwen3-4B-Thinking-2507   |/data/jisenli2/zhongzhu_kv/q_rotation_layer_second_moment_damp01.pt                 |4,5  |2 |1 |1"
-    "Rotation_QR   |1 |0 |128|INT4|Qwen/Qwen3-4B-Thinking-2507  |/data/jisenli2/zhongzhu_kv/q_rotation_layer_second_moment_damp01.pt                   |6,7  |2 |1 |1"
-    # "Rotation_QR   |1 |0 |16 |INT4 |Qwen/Qwen3-8B   |/data/jisenli2/zhongzhu_kv/q_rotation_layer_second_moment_damp01.pt                               |4,5  |2 |1 |1"
-    # "Rotation_QR   |1 |0 |128|INT4|Qwen/Qwen3-8B  |/data/jisenli2/zhongzhu_kv/q_rotation_layer_second_moment_damp01.pt                                 |6,7  |2 |1 |1"
+    # "Rotation_QR   |1 |0 |16 |INT4 |Qwen/Qwen3-4B-Thinking-2507   |/data/jisenli2/zhongzhu_kv/q_rotation_layer_second_moment_damp01.pt                 |0,1,2,3,4,5,6,7  |2 |1 |4"
+    # "Rotation_QR   |1 |0 |128|INT4|Qwen/Qwen3-4B-Thinking-2507  |/data/jisenli2/zhongzhu_kv/q_rotation_layer_second_moment_damp01.pt                   |0,1,2,3,4,5,6,7  |2 |1 |4"
+    "Rotation_QR   |1 |0 |16 |INT4 |Qwen/Qwen3-8B   |/data/jisenli2/zhongzhu_kv/Qwen3-8B_q_rotation_layer.pt                               |0,1,2,3,4,5,6,7  |2 |1 |4"
+    "Rotation_QR   |1 |0 |128|INT4|Qwen/Qwen3-8B  |/data/jisenli2/zhongzhu_kv/Qwen3-8B_q_rotation_layer.pt                                 |0,1,2,3,4,5,6,7  |2 |1 |4"
     # "BASE         |0 |0 |0  |BF16 |Qwen/Qwen3-4B-Thinking-2507   |                                                                                    |0  |1 |1 |1"
     # "BASE         |0 |0 |0  |INT4 |Qwen/Qwen3-4B-Thinking-2507   |                                                                                    |1  |1 |1 |1"
     # "Rotation     |1 |0 |16 |INT4 |Qwen/Qwen3-4B-Thinking-2507   |                                                                                    |2  |1 |1 |1"

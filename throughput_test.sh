@@ -31,10 +31,10 @@ REPO_ROOT="$SCRIPT_DIR"
 # =============================================================================
 # Throughput Test Parameters
 # =============================================================================
-BATCH_SIZES=(256)
+BATCH_SIZES=(1 8 16 32)
 INPUT_LENS=(8192)
 OUTPUT_LENS=(1024)
-NUM_EXAMPLES=(256)
+NUM_EXAMPLES=(4 32 32 32)
 
 # =============================================================================
 # Model Configs
@@ -55,10 +55,10 @@ NUM_EXAMPLES=(256)
 #
 MODEL_CONFIGS=(
     # mode         |rk|rv|ho |dtype|model                          |q_rotation_path                                                                     |gpu|tp|ep|dp
-    "Rotation_QR   |1 |0 |16 |INT4 |Qwen/Qwen3-4B-Thinking-2507   |/data/jisenli2/zhongzhu_kv/q_rotation_layer_second_moment_damp01.pt                 |0,1  |2 |1 |1"
-    "Rotation_QR   |1 |0 |128|INT4|Qwen/Qwen3-4B-Thinking-2507  |/data/jisenli2/zhongzhu_kv/q_rotation_layer_second_moment_damp01.pt                   |2,3  |2 |1 |1"
-    # "Rotation_QR   |1 |0 |16 |INT4 |Qwen/Qwen3-8B   |/data/jisenli2/zhongzhu_kv/q_rotation_layer_second_moment_damp01.pt                               |4,5  |2 |1 |1"
-    # "Rotation_QR   |1 |0 |128|INT4|Qwen/Qwen3-8B  |/data/jisenli2/zhongzhu_kv/q_rotation_layer_second_moment_damp01.pt                                 |6,7  |2 |1 |1"
+    # "Rotation_QR   |1 |0 |16 |INT4 |Qwen/Qwen3-4B-Thinking-2507   |/data/jisenli2/zhongzhu_kv/q_rotation_layer_second_moment_damp01.pt                 |0,1  |2 |1 |1"
+    # "Rotation_QR   |1 |0 |128|INT4|Qwen/Qwen3-4B-Thinking-2507  |/data/jisenli2/zhongzhu_kv/q_rotation_layer_second_moment_damp01.pt                   |2,3  |2 |1 |1"
+    "Rotation_QR   |1 |0 |16 |INT4 |Qwen/Qwen3-8B   |/data/jisenli2/zhongzhu_kv/Qwen3-8B_q_rotation_layer.pt                               |0,1  |2 |1 |1"
+    "Rotation_QR   |1 |0 |128|INT4|Qwen/Qwen3-8B  |/data/jisenli2/zhongzhu_kv/Qwen3-8B_q_rotation_layer.pt                                 |2,3  |2 |1 |1"
     
     # "BASE         |0 |0 |0  |BF16 |Qwen/Qwen3-4B-Thinking-2507   |                                                                                    |0  |1 |1 |1"
     # "BASE         |0 |0 |0  |INT4 |Qwen/Qwen3-4B-Thinking-2507   |                                                                                    |1  |1 |1 |1"

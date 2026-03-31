@@ -286,3 +286,5 @@ datasets/
 q_rotation_layer_second_moment_damp01.pt
 old_throughput_logs/
 throughput_logs/
+Qwen3-8B_q_rotation_layer.pt
+ttft_logs/
