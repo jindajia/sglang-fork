@@ -235,7 +235,7 @@ start_single_server() {
         --max-queued-requests 256 \
         --page-size 128 \
         --chunked-prefill-size 4096 \
-        --mem-fraction-static 0.8 \
+        --mem-fraction-static 0.7 \
         --pp-max-micro-batch-size 32 \
         --kv-cache-dtype "$kv_cache_dtype" \
         --tool-call-parser glm47 \
