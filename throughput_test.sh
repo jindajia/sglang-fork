@@ -72,20 +72,20 @@ MODEL_CONFIGS=(
     # "QUANT |1|0|512 |INT4|Qwen/Qwen3-4B-Thinking-2507|0|5|1|1|1"
     # "QUANT |1|0|1024 |INT4|Qwen/Qwen3-4B-Thinking-2507|0|6|1|1|1"
     # ---- KMEANS examples (uncomment and fill n_clusters as needed) -----------
-    "KMEANS|0|0|0 |INT4|Qwen/Qwen3-4B-Thinking-2507|1|0,1|2|1|1"
-    "KMEANS|0|0|0 |INT4|Qwen/Qwen3-4B-Thinking-2507|16|2,3|2|1|1"
-    "KMEANS|0|0|0 |INT4|Qwen/Qwen3-4B-Thinking-2507|256|4,5|2|1|1"
-    "KMEANS|0|0|0 |INT4|Qwen/Qwen3-4B-Thinking-2507|2048|6,7|2|1|1"
+    # "KMEANS|0|0|0 |INT4|Qwen/Qwen3-4B-Thinking-2507|1|0,1|2|1|1"
+    # "KMEANS|0|0|0 |INT4|Qwen/Qwen3-4B-Thinking-2507|16|2,3|2|1|1"
+    # "KMEANS|0|0|0 |INT4|Qwen/Qwen3-4B-Thinking-2507|256|4,5|2|1|1"
+    # "KMEANS|0|0|0 |INT4|Qwen/Qwen3-4B-Thinking-2507|2048|6,7|2|1|1"
 
-    "KMEANS|0|0|0 |INT4|Qwen/Qwen3-8B|1|0,1|2|1|1"
-    "KMEANS|0|0|0 |INT4|Qwen/Qwen3-8B|16|2,3|2|1|1"
-    "KMEANS|0|0|0 |INT4|Qwen/Qwen3-8B|256|4,5|2|1|1"
-    "KMEANS|0|0|0 |INT4|Qwen/Qwen3-8B|2048|6,7|2|1|1"
+    # "KMEANS|0|0|0 |INT4|Qwen/Qwen3-8B|1|0,1|2|1|1"
+    # "KMEANS|0|0|0 |INT4|Qwen/Qwen3-8B|16|2,3|2|1|1"
+    # "KMEANS|0|0|0 |INT4|Qwen/Qwen3-8B|256|4,5|2|1|1"
+    # "KMEANS|0|0|0 |INT4|Qwen/Qwen3-8B|2048|6,7|2|1|1"
 
-    "KMEANS|0|0|0 |INT4|Qwen/Qwen3-32B|1|0,1|2|1|1"
-    "KMEANS|0|0|0 |INT4|Qwen/Qwen3-32B|16|2,3|2|1|1"
-    "KMEANS|0|0|0 |INT4|Qwen/Qwen3-32B|256|4,5|2|1|1"
-    "KMEANS|0|0|0 |INT4|Qwen/Qwen3-32B|2048|6,7|2|1|1"
+    # "KMEANS|0|0|0 |INT4|Qwen/Qwen3-32B|1|0,1|2|1|1"
+    # "KMEANS|0|0|0 |INT4|Qwen/Qwen3-32B|16|2,3|2|1|1"
+    # "KMEANS|0|0|0 |INT4|Qwen/Qwen3-32B|256|4,5|2|1|1"
+    # "KMEANS|0|0|0 |INT4|Qwen/Qwen3-32B|2048|6,7|2|1|1"
 
     "KMEANS|0|0|0 |INT4|zai-org/GLM-4.7-FP8|1|0,1,2,3,4,5,6,7|8|1|1"
     "KMEANS|0|0|0 |INT4|zai-org/GLM-4.7-FP8|16|0,1,2,3,4,5,6,7|8|1|1"
@@ -127,7 +127,9 @@ CONDA_ENV_NAME="sglang_env"
 CONDA_ENV_DIR="$CONDA_BASE/envs/$CONDA_ENV_NAME"
 PYTHON="$CONDA_ENV_DIR/bin/python3"
 
-export TRITON_CACHE_DIR="/data/$USER/.triton/cache"
+export TRITON_CACHE_DIR="/dev/shm/triton_cache_$USER"
+export FLASHINFER_CACHE_DIR="/data/$USER/.cache/flashinfer"
+export SGLANG_DISABLE_FLASHINFER_TRTLLM_AR_FUSION=1
 
 GPU_FREE_MEM_MB="${GPU_FREE_MEM_MB:-500}"
 GPU_POLL_INTERVAL="${GPU_POLL_INTERVAL:-240}"
@@ -432,6 +434,7 @@ benchmark_single_model() {
         --host 0.0.0.0 \
         --port "$server_port" \
         --trust-remote-code \
+        --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 119}' \
         --log-requests \
         --log-requests-level 0 \
         --enable-request-time-stats-logging \

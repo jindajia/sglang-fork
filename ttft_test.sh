@@ -435,6 +435,7 @@ benchmark_single_model() {
         --host 0.0.0.0 \
         --port "$server_port" \
         --trust-remote-code \
+        --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 119}' \
         --log-requests \
         --log-requests-level 0 \
         --enable-request-time-stats-logging \
