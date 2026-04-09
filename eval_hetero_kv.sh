@@ -201,6 +201,7 @@ eval_single_config() {
         --decode-attention-backend trtllm_mla \
         --trust-remote-code \
         --quantization modelopt_fp4 \
+        --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 119}' \
         --enable-metrics \
         --enable-flashinfer-allreduce-fusion \
         --log-requests \

@@ -128,6 +128,7 @@ from sglang.srt.models.deepseek_common.deepseek_weight_loader import (
     DeepseekV2WeightLoaderMixin,
 )
 from sglang.srt.models.deepseek_common.utils import (
+    FORWARD_ABSORB_CORE_ATTENTION_BACKENDS,
     _device_sm,
     _get_llama_4_scaling,
     _is_cpu,
@@ -139,6 +140,12 @@ from sglang.srt.models.deepseek_common.utils import (
     _use_aiter,
     _use_aiter_gfx95,
     yarn_get_mscale,
+)
+from sglang.srt.compilation.piecewise_context_manager import is_in_piecewise_cuda_graph
+from sglang.srt.layers.quantization.fp8_kernel import (
+    fp8_dtype,
+    per_tensor_quant_mla_fp8,
+    per_token_group_quant_mla_deep_gemm_masked_fp8,
 )
 from sglang.srt.server_args import get_global_server_args
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm

@@ -60,6 +60,9 @@ echo "=== Installing requirements-eval.txt ==="
 echo "=== Installing sglang from this repo (editable) ==="
 "$CONDA_ENV_DIR/bin/pip" install -e "$SCRIPT_DIR/python" --no-build-isolation -q
 
+echo "=== Upgrading CuDNN (9.16+ required for PyTorch 2.9.1 compatibility) ==="
+"$CONDA_ENV_DIR/bin/pip" install nvidia-cudnn-cu12==9.16.0.29 -q
+
 echo "=== Downloading flashinfer cubin files ==="
 FLASHINFER_CUBIN_DOWNLOAD_THREADS=8 \
 "$CONDA_ENV_DIR/bin/python3" -m flashinfer --download-cubin || echo "WARNING: cubin download failed (will retry at first server start)"
