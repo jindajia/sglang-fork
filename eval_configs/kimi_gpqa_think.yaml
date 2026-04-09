@@ -1,0 +1,15 @@
+name: gpqa
+
+# framework arguments
+provider: custom
+framework: simple-evals
+
+max_new_tokens: 32768
+
+system_message: "You are a helpful assistant."
+
+temperature: 1.0
+top_p: 0.95
+
+tasks:
+  - gpqa

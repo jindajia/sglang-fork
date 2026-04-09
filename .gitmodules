@@ -1,0 +1,3 @@
+[submodule "tore-eval"]
+	path = tore-eval
+	url = git@github.com:togethercomputer/tore-eval.git

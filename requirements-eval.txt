@@ -1,0 +1,21 @@
+# Build dependencies (pre-installed separately before this file)
+# grpcio-tools, numpy, packaging are installed first in the script
+
+# simple-evals dependencies
+openai
+anthropic
+pandas
+scipy
+jinja2
+tqdm
+requests
+blobfile
+human_eval
+
+# General eval dependencies
+ray
+word2number
+huggingface-hub>=0.25.0
+
+# lm_eval (accuracy benchmarks)
+lm_eval
