@@ -38,6 +38,13 @@ def load_metrics(csv_path: Path):
                     "otps_p80":           _f(row, "user_tps_p80"),
                     "otps_p95":           _f(row, "user_tps_p95"),
                     "otps_p99":           _f(row, "user_tps_p99"),
+                    "hit_mean":           _f(row, "cache_hit_ratio_mean"),
+                    "hit_std":            _f(row, "cache_hit_ratio_stdev"),
+                    "hit_p05":            _f(row, "cache_hit_ratio_p05"),
+                    "hit_p50":            _f(row, "cache_hit_ratio_p50"),
+                    "hit_p80":            _f(row, "cache_hit_ratio_p80"),
+                    "hit_p95":            _f(row, "cache_hit_ratio_p95"),
+                    "hit_p99":            _f(row, "cache_hit_ratio_p99"),
                     "ttft_mean":          _f(row, "ttft_mean"),
                     "ttft_std":           _f(row, "ttft_stdev"),
                     "elapsed_s":          _f(row, "summary_total_elapsed_time_s"),
@@ -70,8 +77,12 @@ _CSV_RE = re.compile(r"^bs(\d+)_(.+)\.csv$")
 _BS_ORDER = [1, 8, 16, 32]
 
 
-def render_config_table(config_dir: Path) -> str:
-    """Build a Markdown table from all CSVs found in a config directory."""
+def render_config_table(config_dir: Path, cache_hit: bool = False) -> str:
+    """Build a Markdown table from all CSVs found in a config directory.
+
+    If cache_hit=True, replace the OTPS percentile columns with cache-hit-ratio
+    percentile columns (useful for Mode 2 prefix-cache benchmarks).
+    """
     rows_data = []
     for csv_path in sorted(config_dir.glob("bs*.csv")):
         m = _CSV_RE.match(csv_path.name)
@@ -85,40 +96,79 @@ def render_config_table(config_dir: Path) -> str:
     if not rows_data:
         return "_No CSV files found._"
 
-    # Sort by canonical BS order, then shape
+    # Sort:
+    #   cache_hit mode (Mode 2): primary key = run number extracted from shape
+    #     (e.g. 'nqa100k_run1' → 1), so all run1 rows come before run2 rows,
+    #     with BS ordered canonically within each run group.
+    #   default (Mode 1): BS first, then shape.
+    def extract_run(shape: str) -> int:
+        m = re.search(r"run(\d+)", shape)
+        return int(m.group(1)) if m else 0
+
     def sort_key(item):
         bs, shape, _ = item
         try:
-            return (_BS_ORDER.index(bs), shape)
+            bs_key = _BS_ORDER.index(bs)
         except ValueError:
-            return (len(_BS_ORDER) + bs, shape)
+            bs_key = len(_BS_ORDER) + bs
+        if cache_hit:
+            return (extract_run(shape), bs_key, shape)
+        return (bs_key, shape)
 
     rows_data.sort(key=sort_key)
 
-    header = ("| BS | Shape "
-              "| OTPS±stdev | OTPS_p05 | OTPS_p50 | OTPS_p80 | OTPS_p95 | OTPS_p99 "
-              "| TTFT±stdev "
-              "| elapsed_s | job_tps | actual_qps "
-              "| gpus | per_gpu_tps±stdev |")
-    sep    = ("|----|-------"
-              "|------------|----------|----------|----------|----------|----------"
-              "|------------"
-              "|-----------|---------|------------"
-              "|------|-------------------|")
+    if cache_hit:
+        header = ("| BS | Shape "
+                  "| OTPS±stdev "
+                  "| HIT±stdev | HIT_p05 | HIT_p50 | HIT_p80 | HIT_p95 | HIT_p99 "
+                  "| TTFT±stdev "
+                  "| elapsed_s | job_tps | actual_qps "
+                  "| gpus | per_gpu_tps±stdev |")
+        sep    = ("|----|-------"
+                  "|------------"
+                  "|-----------|---------|---------|---------|---------|---------"
+                  "|------------"
+                  "|-----------|---------|------------"
+                  "|------|-------------------|")
+    else:
+        header = ("| BS | Shape "
+                  "| OTPS±stdev | OTPS_p05 | OTPS_p50 | OTPS_p80 | OTPS_p95 | OTPS_p99 "
+                  "| TTFT±stdev "
+                  "| elapsed_s | job_tps | actual_qps "
+                  "| gpus | per_gpu_tps±stdev |")
+        sep    = ("|----|-------"
+                  "|------------|----------|----------|----------|----------|----------"
+                  "|------------"
+                  "|-----------|---------|------------"
+                  "|------|-------------------|")
     lines  = [header, sep]
 
     for bs, shape, m in rows_data:
         if m is None:
             m = {}
         gpus = int(m["per_gpu_num_gpus"]) if m.get("per_gpu_num_gpus") is not None else None
+        if cache_hit:
+            middle_cols = (
+                f"| {fmt(m.get('otps_mean'), m.get('otps_std'))} "
+                f"| {fmt(m.get('hit_mean'), m.get('hit_std'), precision=3)} "
+                f"| {fv(m.get('hit_p05'), precision=3)} "
+                f"| {fv(m.get('hit_p50'), precision=3)} "
+                f"| {fv(m.get('hit_p80'), precision=3)} "
+                f"| {fv(m.get('hit_p95'), precision=3)} "
+                f"| {fv(m.get('hit_p99'), precision=3)} "
+            )
+        else:
+            middle_cols = (
+                f"| {fmt(m.get('otps_mean'), m.get('otps_std'))} "
+                f"| {fv(m.get('otps_p05'))} "
+                f"| {fv(m.get('otps_p50'))} "
+                f"| {fv(m.get('otps_p80'))} "
+                f"| {fv(m.get('otps_p95'))} "
+                f"| {fv(m.get('otps_p99'))} "
+            )
         lines.append(
             f"| {bs} | {shape} "
-            f"| {fmt(m.get('otps_mean'), m.get('otps_std'))} "
-            f"| {fv(m.get('otps_p05'))} "
-            f"| {fv(m.get('otps_p50'))} "
-            f"| {fv(m.get('otps_p80'))} "
-            f"| {fv(m.get('otps_p95'))} "
-            f"| {fv(m.get('otps_p99'))} "
+            f"{middle_cols}"
             f"| {fmt(m.get('ttft_mean'), m.get('ttft_std'))} "
             f"| {fv(m.get('elapsed_s'))} "
             f"| {fv(m.get('job_level_tps'))} "
@@ -140,6 +190,12 @@ def main():
         "--output",
         default="throughput_summary.md",
         help="Output Markdown file (default: throughput_summary.md)",
+    )
+    parser.add_argument(
+        "--cache-hit",
+        action="store_true",
+        help="Replace OTPS percentile columns with cache-hit-ratio percentile columns "
+             "(for Mode 2 prefix-cache benchmarks).",
     )
     args = parser.parse_args()
 
@@ -182,7 +238,7 @@ def main():
         for config_dir in config_dirs:
             lines.append(f"### {config_dir.name}")
             lines.append("")
-            lines.append(render_config_table(config_dir))
+            lines.append(render_config_table(config_dir, cache_hit=args.cache_hit))
             lines.append("")
 
     md = "\n".join(lines)

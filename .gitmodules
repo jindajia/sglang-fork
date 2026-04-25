@@ -1,4 +1,4 @@
 [submodule "tore-speed-eval"]
 	path = tore-speed-eval
 	url = git@github.com:togethercomputer/tore-speed-eval.git
-	branch = jisen/aurora-eval
+	branch = jisen/cache-hit-eval

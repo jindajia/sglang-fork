@@ -1,19 +1,15 @@
 #!/bin/bash
-# throughput_test.sh — SGLang throughput benchmarking with tore-speed-eval
+# mode2_throughput_test.sh — SGLang throughput benchmark with prefix-cache ON
 #
-# Measures OTPS / TPS / TTFT across batch sizes and input lengths.
-#
-# Modes: BASE, QUANT, KMEANS  (same naming as eval_quant.sh)
-#   BASE  — no rotation, no kmeans
-#   QUANT — Hadamard rotation only
-#   KMEANS — Hadamard rotation + K-means centroids
-#
-# For KMEANS: centroids must already exist locally.
-#             Script exits immediately if centroid files are not found.
-#             Run dump_centroids.sh first to generate them.
+# Mode 2 vs Mode 1 differences:
+#   - Prefix cache ENABLED (no --disable-radix-cache)
+#   - Real-data dataset (tore-speed-eval narrativeqa), NOT synthetic
+#   - Same workload runs N times back-to-back (no server restart) so that
+#     run 2+ benefits from the radix tree populated by run 1
+#   - Primary metric: later-run throughput (prefix-cache hit); run 1 kept for delta
 #
 # GPU scheduling: configs on non-overlapping GPUs launch in parallel.
-# Results: throughput_results/{model_short}/{rot_suffix}/bs{N}_{in_label}.csv
+# Results: mode2_throughput_results/{model_short}/{rot_suffix}/bs{N}_{ds}_run{R}.csv
 
 set -eo pipefail
 
@@ -33,12 +29,20 @@ trap cleanup INT TERM
 # =============================================================================
 # Throughput Test Parameters
 # =============================================================================
-BATCH_SIZES=(1 8 16 32 128 256)
-INPUT_LENS=(8192)
-OUTPUT_LENS=(1024)
-NUM_EXAMPLES=(4 32 32 32 128 256)   # paired 1:1 with BATCH_SIZES
+# BATCH_SIZES=(1 8 16 32 256)
+# NUM_EXAMPLES=(4 32 32 32 256)                                  # paired 1:1 with BATCH_SIZES
 
-# Sampling parameters (applied to both warmup and main eval)
+BATCH_SIZES=(1 8 16 32)
+NUM_EXAMPLES=(4 32 32 32)                                  # paired 1:1 with BATCH_SIZES
+
+MAX_TOKENS="${MAX_TOKENS:-1024}"                           # output cap (input comes from dataset)
+NUM_RUNS="${NUM_RUNS:-2}"                                  # repeat-run count for prefix-cache warm-up
+
+# Real-data dataset for prefix-cache-on benchmark
+HF_DATASET="${HF_DATASET:-togethercomputer/tore-speed-eval-narrativeqa-100k}"
+HF_DATASET_LABEL="${HF_DATASET_LABEL:-nqa100k}"            # short label embedded in CSV filename
+
+# Sampling parameters (applied to main eval)
 # Empty → auto-pick per-model-family defaults in benchmark_single_model:
 #   Qwen series → 0.7 / 0.95
 #   GLM series  → 1.0 / 0.7
@@ -48,55 +52,37 @@ TOP_P="${TOP_P:-}"
 # =============================================================================
 # Model Configs
 # =============================================================================
-# Format: "fuse|mode|hadamard|rotate_v|hadamard_order|kv_dtype|model_name|n_clusters|eval_gpus|eval_tp|eval_ep|eval_dp"
+# Format: "fuse|mode|hadamard|rotate_v|hadamard_order|kv_dtype|model_name|eval_gpus|eval_tp|eval_ep|eval_dp"
 #
 #   fuse          : SGLANG_FUSE_HADAMARD_INT4_KV — 1=fused Hadamard, 0=unfused
-#   mode          : BASE, QUANT, or KMEANS
+#   mode          : BASE or QUANT
 #   hadamard      : 0 or 1 (ignored for BASE)
 #   rotate_v      : 0 or 1 (ignored for BASE)
 #   hadamard_order: e.g. 16, 64, 128 (ignored for BASE)
 #   kv_dtype      : BF16 or INT4
 #   model_name    : full HuggingFace model ID
-#   n_clusters    : K-means cluster count (KMEANS only; set 0 for BASE/QUANT)
 #   eval_gpus     : comma-separated GPU IDs for the server
 #   eval_tp       : tensor parallel size
 #   eval_ep       : expert parallel size
 #   eval_dp       : data parallel size
 #
 MODEL_CONFIGS=(
-    # ---- INT4 fused kernel, hadamard=1 rotate_v=1 order=16 (donglin-equivalent) ----
-    # 4B / 8B run in parallel on GPU 0 / 1 (TP=1); GLM-4.7 runs after on all 8 GPUs (TP=8)
-    # "1|QUANT|1|1|16|INT4|Qwen/Qwen3-4B-Thinking-2507|0|0|1|1|1"
-    # "1|QUANT|1|1|16|INT4|Qwen/Qwen3-8B|0|1|1|1|1"
-    "1|QUANT|1|1|16|INT4|zai-org/GLM-4.7-FP8|0|0,1,2,3,4,5,6,7|8|1|1"
-)
-
-# =============================================================================
-# Model → num_layers lookup (needed for KMEANS centroid path verification)
-# Add new models here before adding them to MODEL_CONFIGS.
-# =============================================================================
-declare -A MODEL_NUM_LAYERS=(
-    ["Qwen/Qwen3-8B"]=36
-    ["Qwen/Qwen3-32B"]=64
-    ["zai-org/GLM-4.7-FP8"]=92
-    ["Qwen/Qwen3-4B-Thinking-2507"]=36
+    # ---- INT4 fused kernel, hadamard=1 rotate_v=1 order=16 (donglin-equivalent), TP=1 ----
+    "1|QUANT|1|1|16|INT4|Qwen/Qwen3-4B-Thinking-2507|0|1|1|1"
+    # "1|QUANT|1|1|16|INT4|Qwen/Qwen3-8B|1|1|1|1"
+    # "1|QUANT|1|1|16|INT4|zai-org/GLM-4.7-FP8|0,1,2,3,4,5,6,7|8|1|1"
 )
 
 # =============================================================================
 # Server & Path Config
 # =============================================================================
-BASE_PORT=31100
+BASE_PORT=32100
 
-# Base directory for KV dump files and centroids (KMEANS mode only)
-KV_DUMP_BASE="${KV_DUMP_BASE:-/data/$USER/kv-cache}"
-# Task name used when the KV cache was dumped (must match dump_centroids.sh)
-DUMP_LM_EVAL_TASKS="mmlu_pro"
-DUMP_TOKENS=20000
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TORE_SPEED_EVAL_DIR="$SCRIPT_DIR/tore-speed-eval"
-RESULTS_DIR="$SCRIPT_DIR/throughput_results_TP1"
-LOGS_DIR="$SCRIPT_DIR/throughput_logs_TP1"
+RESULTS_DIR="${RESULTS_DIR:-$SCRIPT_DIR/mode2_throughput_results}"
+LOGS_DIR="${LOGS_DIR:-$SCRIPT_DIR/mode2_throughput_logs}"
 
 export HF_HOME=/data/shared/huggingface
 
@@ -233,17 +219,18 @@ extract_per_request_stats() {
         return
     fi
 
-    # Parse TPS + RUNNING_REQS from Finish:/#running-req lines with Python.
-    # NOTE: new SGLang dropped prefill_finished_ts / request_received_ts fields from the
-    # Finish: log, so OTPS and TTFT can no longer be derived from server log.
-    # Refer to tore-speed-eval CSV (ttft_mean / user_tps_mean) for those metrics instead.
+    # Parse TPS, OTPS, TTFT from Finish: lines with Python
+    # Fields (order not fixed, use regex):
+    #   prompt_tokens, completion_tokens, e2e_latency
+    #   request_received_ts, prefill_finished_ts (or api_server_dispatch_finish_ts)
     echo "$run_log" \
         | grep -E "Finish:|#running-req" \
         | grep -v "HEALTH_CHECK" \
         | "$PYTHON" -c "
 import sys, re
 
-tps_vals = []
+tps_vals, otps_vals, ttft_vals = [], [], []
+cache_ratios, cached_tokens_vals = [], []
 running_req_vals = []
 
 for line in sys.stdin:
@@ -256,6 +243,11 @@ for line in sys.stdin:
     pt   = re.search(r\"'prompt_tokens': (\d+)\", line)
     ct   = re.search(r\"'completion_tokens': (\d+)\", line)
     e2e  = re.search(r\"'e2e_latency': ([\d.]+)\", line)
+    recv = re.search(r\"'request_received_ts': ([\d.]+)\", line)
+    cached = re.search(r\"'cached_tokens': (\d+)\", line)
+    # prefer prefill_finished_ts; fall back to api_server_dispatch_finish_ts
+    pf   = re.search(r\"'prefill_finished_ts': ([\d.]+)\", line) or \
+           re.search(r\"'api_server_dispatch_finish_ts': ([\d.]+)\", line)
 
     if not (pt and ct and e2e):
         continue
@@ -264,6 +256,18 @@ for line in sys.stdin:
         continue
 
     tps_vals.append((p + c) / lat)
+
+    if recv and pf:
+        ttft = float(pf.group(1)) - float(recv.group(1))
+        ttft_vals.append(ttft)
+        decode_time = lat - ttft
+        if decode_time > 0 and c > 0:
+            otps_vals.append(c / decode_time)
+
+    if cached and p > 0:
+        cached_n = int(cached.group(1))
+        cached_tokens_vals.append(cached_n)
+        cache_ratios.append(cached_n / p)
 
 def summarize(vals, label, unit):
     if not vals:
@@ -277,29 +281,14 @@ def summarize(vals, label, unit):
     p95  = vals_s[min(n-1, int(n * 0.95))]
     print(f'  {label} [{unit}]: Mean={mean:.3f}  P50={p50:.3f}  P05={p05:.3f}  P95={p95:.3f}  n={n}')
 
-summarize(tps_vals,         'TPS  (prompt+output / e2e)',     'tok/s')
-summarize(running_req_vals, 'RUNNING_REQS (server in-flight)', 'reqs')
+summarize(tps_vals,           'TPS  (prompt+output / e2e)',    'tok/s')
+# NOTE: new SGLang dropped prefill_finished_ts / request_received_ts fields from the
+# Finish: log, so OTPS and TTFT can no longer be derived from server log.
+# Refer to tore-speed-eval CSV (ttft_mean / user_tps_mean) for these metrics instead.
+summarize(cached_tokens_vals, 'CACHED_TOKENS (cache hit)',     'tokens')
+summarize(cache_ratios,       'CACHE_HIT_RATIO',               '(0-1)')
+summarize(running_req_vals,   'RUNNING_REQS (server in-flight)', 'reqs')
 " 2>&1 | tee -a "$stats_log"
-}
-
-# =============================================================================
-# KMEANS centroid check — exit immediately if files are missing
-# =============================================================================
-check_kmeans_centroids() {
-    local model_name="$1" num_layers="$2" n_clusters="$3"
-    local model_short
-    model_short="$(extract_model_short_name "$model_name")"
-    local cdir="${KV_DUMP_BASE}/${model_short}/${DUMP_LM_EVAL_TASKS}-${DUMP_TOKENS}-tokens/c_${n_clusters}"
-    local expected=$((num_layers * 2))
-    local actual
-    actual=$(find "${cdir}" -name "*.pt" 2>/dev/null | wc -l)
-    if [ "$actual" -lt "$expected" ]; then
-        echo "ERROR: KMEANS centroids incomplete ($actual/${expected} .pt files) at:"
-        echo "       $cdir"
-        echo "       Run dump_centroids.sh first to generate centroids."
-        exit 1
-    fi
-    log_message "✓ KMEANS centroids verified ($actual files): $cdir"
 }
 
 # =============================================================================
@@ -307,9 +296,9 @@ check_kmeans_centroids() {
 # =============================================================================
 benchmark_single_model() {
     local mode="$1" hadamard="$2" rotate_v="$3" hadamard_order="$4" kv_dtype="$5" \
-          model_name="$6" num_layers="$7" n_clusters="$8" \
-          tp_size="$9" ep_size="${10}" dp_size="${11}" gpu_devices="${12}" \
-          server_port="${13}" fuse_hadamard="${14}"
+          model_name="$6" \
+          tp_size="$7" ep_size="$8" dp_size="$9" gpu_devices="${10}" \
+          server_port="${11}" fuse_hadamard="${12}"
     if [[ -z "$fuse_hadamard" ]]; then
         echo "ERROR: fuse_hadamard (field 1) missing in config"
         return 1
@@ -318,8 +307,8 @@ benchmark_single_model() {
     local model_short
     model_short="$(extract_model_short_name "$model_name")"
 
-    if [[ "$mode" != "BASE" && "$mode" != "QUANT" && "$mode" != "KMEANS" ]]; then
-        echo "ERROR: mode must be BASE, QUANT, or KMEANS, got: '$mode'"
+    if [[ "$mode" != "BASE" && "$mode" != "QUANT" ]]; then
+        echo "ERROR: mode must be BASE or QUANT, got: '$mode'"
         return 1
     fi
 
@@ -351,14 +340,8 @@ benchmark_single_model() {
     local rot_suffix
     if [[ "$mode" == "BASE" ]]; then
         rot_suffix="baseline_${kv_dtype_lower}"
-    elif [[ "$mode" == "QUANT" ]]; then
-        rot_suffix="quant_${kv_dtype_lower}_${hadamard}_${rotate_v}_${hadamard_order}_${fuse_suffix}"
     else
-        if [[ "$hadamard" == "0" && "$rotate_v" == "0" ]]; then
-            rot_suffix="kmeans_${n_clusters}"
-        else
-            rot_suffix="kmeans_quant_${n_clusters}_${kv_dtype_lower}_${hadamard}_${rotate_v}_${hadamard_order}_${fuse_suffix}"
-        fi
+        rot_suffix="quant_${kv_dtype_lower}_${hadamard}_${rotate_v}_${hadamard_order}_${fuse_suffix}"
     fi
 
     local result_dir="$RESULTS_DIR/${model_short}/${rot_suffix}"
@@ -373,181 +356,158 @@ benchmark_single_model() {
     log_message "TP/EP/DP:  $tp_size/$ep_size/$dp_size"
     log_message "GPUs:      $gpu_devices"
     log_message "KV dtype:  $kv_dtype (cache: $kv_cache_dtype)"
-    log_message "HADAMARD=$hadamard  ROTATE_V=$rotate_v  HADAMARD_ORDER=$hadamard_order"
-    [[ "$mode" == "KMEANS" ]] && log_message "N_CLUSTERS=$n_clusters"
+    log_message "HADAMARD=$hadamard  ROTATE_V=$rotate_v  HADAMARD_ORDER=$hadamard_order  FUSE_INT4=$fuse_hadamard"
     log_message "Batch sizes:  ${BATCH_SIZES[*]}"
-    log_message "Input lens:   ${INPUT_LENS[*]}"
-    log_message "Output lens:  ${OUTPUT_LENS[*]}  num_examples: ${NUM_EXAMPLES[*]}"
+    log_message "Num examples: ${NUM_EXAMPLES[*]}  (paired 1:1 with batch sizes)"
+    log_message "Dataset:      $HF_DATASET (label=$HF_DATASET_LABEL)"
+    log_message "Max tokens:   $MAX_TOKENS    Num runs: $NUM_RUNS"
     log_message "Results dir:  $result_dir"
     log_message "=========================================="
 
     # ------------------------------------------------------------------
-    # KMEANS: verify centroids exist locally, exit if not
+    # Build server flags (reused across BS-level server restarts)
     # ------------------------------------------------------------------
-    if [[ "$mode" == "KMEANS" ]]; then
-        check_kmeans_centroids "$model_name" "$num_layers" "$n_clusters"
-    fi
-
-    # ------------------------------------------------------------------
-    # Start SGLang server
-    # ------------------------------------------------------------------
-    local centroids_path=""
-    if [[ "$mode" == "KMEANS" ]]; then
-        centroids_path="${KV_DUMP_BASE}/$(extract_model_short_name "$model_name")/${DUMP_LM_EVAL_TASKS}-${DUMP_TOKENS}-tokens/c_${n_clusters}"
-    fi
-
     local mem_fraction="0.8"
+    local EXTRA_KV_ARGS=()
+    # GLM-4.7 chat parsing flags (tool calls / reasoning) per zai-org's recommended launch.
+    if [[ "$model_name" == *GLM* || "$model_name" == *glm* ]]; then
+        EXTRA_KV_ARGS+=(--tool-call-parser glm47 --reasoning-parser glm45)
+    fi
+
+    # Default attention backend: fa3 for prefill + triton for decode
+    local ATTN_ARGS=(--prefill-attention-backend fa3 --decode-attention-backend triton)
 
     unset DUMP_KVCACHE DUMP_KVCACHE_TOKENS DUMP_KVCACHE_DIR
-    log_message "Starting SGLang server on port $server_port..."
-    local server_log
-    server_log=$(unique_log_path "$log_dir/${rot_suffix}_server.log")
-
-    # GLM-4.7 chat parsing flags (tool calls / reasoning) per zai-org's recommended launch.
-    local EXTRA_LAUNCH_ARGS=()
-    if [[ "$model_name" == *GLM* || "$model_name" == *glm* ]]; then
-        EXTRA_LAUNCH_ARGS+=(--tool-call-parser glm47 --reasoning-parser glm45)
-    fi
-
-    HADAMARD=$hadamard \
-    ROTATE_V=$rotate_v \
-    HADAMARD_ORDER=$hadamard_order \
-    N_CLUSTERS=$n_clusters \
-    SGLANG_KV_CENTROIDS_PATH="$centroids_path" \
-    SGLANG_FUSE_HADAMARD_INT4_KV="$fuse_hadamard" \
-    CUDA_VISIBLE_DEVICES=$gpu_devices \
-    PATH="$(dirname "$PYTHON"):$PATH" \
-    LIBRARY_PATH="/usr/local/cuda/targets/x86_64-linux/lib${LIBRARY_PATH:+:$LIBRARY_PATH}" \
-    LD_LIBRARY_PATH="/usr/local/cuda/targets/x86_64-linux/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-    "$PYTHON" -m sglang.launch_server \
-        --model-path "$model_name" \
-        --mem-fraction-static "$mem_fraction" \
-        --kv-cache-dtype "$kv_cache_dtype" \
-        --prefill-attention-backend fa3 \
-        --decode-attention-backend triton \
-        --sampling-backend flashinfer \
-        --tensor-parallel-size "$tp_size" \
-        --expert-parallel-size "$ep_size" \
-        --data-parallel-size "$dp_size" \
-        --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 119}' \
-        --host 0.0.0.0 \
-        --port "$server_port" \
-        --trust-remote-code \
-        --log-requests \
-        --log-requests-level 0 \
-        --enable-request-time-stats-logging \
-        --disable-radix-cache \
-        --chunked-prefill-size 32768 \
-        --max-running-requests 512 \
-        "${EXTRA_LAUNCH_ARGS[@]}" \
-        > "$server_log" 2>&1 &
-    local server_pid=$!
-    log_message "Server started (PID: $server_pid)"
-    # --max-prefill-tokens 262144 \
-    # --chunked-prefill-size -1 \
-    # --max-running-requests 64 \
-    #     --max-queued-requests 256 \
-    #     --page-size 128 \
-    #     --chunked-prefill-size 8192 \
-
-    if ! wait_for_server "$server_port" "$server_pid" "SGLang server"; then
-        tail -50 "$server_log" | tee -a "$BATCH_LOG_FILE"
-        stop_server "$server_pid" "SGLang server"
-        return 1
-    fi
 
     # ------------------------------------------------------------------
-    # Warmup run (results discarded)
-    # ------------------------------------------------------------------
-    log_message "Running warmup (concurrency=1, in=1024, out=128)..."
-    set +e
-    cd "$SCRIPT_DIR"
-    CUDA_VISIBLE_DEVICES="" \
-    "$PYTHON" -m tore_speed_eval.eval \
-        --provider=vllm \
-        --base_url="http://localhost:${server_port}/v1" \
-        --api_key="" \
-        --model_name="$model_name" \
-        --evaluation_output_path=/dev/null \
-        --dataset_type=synthetic \
-        --synthetic_input_length=1024 \
-        --synthetic_output_length=128 \
-        --stream=true \
-        --temperature="$eff_temperature" \
-        --top_p="$eff_top_p" \
-        --num_gpus=1 \
-        --concurrency=1 \
-        --num_examples=8 \
-        --chat=false \
-        2>&1 | tee -a "$BATCH_LOG_FILE"
-    set -e
-    log_message "✓ Warmup done"
-
-    # ------------------------------------------------------------------
-    # Throughput sweeps: BS × input_len
+    # Mode 2 eval: server is RESTARTED per BS so each BS starts with a
+    # clean radix tree. Within a BS, NUM_RUNS passes run back-to-back
+    # against the same server so run 2+ hits the KV populated by run 1.
+    # --enable-cache-report populates 'cached_tokens_details' in Finish: log.
     # ------------------------------------------------------------------
     local stats_log="${result_dir}/per_request_stats.log"
     local overall_exit=0
     for idx in "${!BATCH_SIZES[@]}"; do
         bs="${BATCH_SIZES[$idx]}"
         local num_examples="${NUM_EXAMPLES[$idx]}"
-        for input_len in "${INPUT_LENS[@]}"; do
-            for output_len in "${OUTPUT_LENS[@]}"; do
-                local label_in label_out
-                label_in=$(input_len_label "$input_len")
-                label_out=$(output_len_label "$output_len")
-                local csv_path="${result_dir}/bs${bs}_${label_in}_${label_out}.csv"
 
-                # Skip if result already exists
-                if [ -f "$csv_path" ]; then
-                    log_message "  Skip BS=${bs} ${label_in} ${label_out}: $csv_path already exists"
-                    continue
-                fi
-
-                # Record server log line count before this run for stats extraction
-                local log_line_before
-                log_line_before=$(wc -l < "$server_log" 2>/dev/null || echo 0)
-
-                log_message "  BS=${bs}  input=${label_in}  output=${label_out}  examples=${num_examples}"
-                set +e
-                cd "$SCRIPT_DIR"
-                CUDA_VISIBLE_DEVICES="" \
-                "$PYTHON" -m tore_speed_eval.eval \
-                    --provider=vllm \
-                    --base_url="http://localhost:${server_port}/v1" \
-                    --api_key="" \
-                    --model_name="$model_name" \
-                    --evaluation_output_path="$csv_path" \
-                    --dataset_type=synthetic \
-                    --synthetic_input_length="$input_len" \
-                    --synthetic_output_length="$output_len" \
-                    --stream=true \
-                    --temperature="$eff_temperature" \
-                    --top_p="$eff_top_p" \
-                    --num_gpus="$tp_size" \
-                    --concurrency="$bs" \
-                    --num_examples="$num_examples" \
-                    --chat=false \
-                    2>&1 | tee -a "$BATCH_LOG_FILE"
-                local eval_exit=${PIPESTATUS[0]}
-                set -e
-
-                if [ $eval_exit -ne 0 ]; then
-                    log_message "  ✗ BS=${bs} ${label_in} ${label_out} failed (exit: $eval_exit)"
-                    overall_exit=$eval_exit
-                else
-                    log_message "  ✓ BS=${bs} ${label_in} ${label_out} -> $csv_path"
-                fi
-
-                # Extract per-request TPS / OTPS / TTFT from server log for this run
-                extract_per_request_stats \
-                    "$server_log" "$log_line_before" "$rot_suffix" \
-                    "$bs" "${label_in}_${label_out}" "$stats_log"
-            done
+        # Skip entire BS if all NUM_RUNS CSVs already exist
+        local all_exist=1
+        for run_idx in $(seq 1 "$NUM_RUNS"); do
+            if [ ! -f "${result_dir}/bs${bs}_${HF_DATASET_LABEL}_run${run_idx}.csv" ]; then
+                all_exist=0
+                break
+            fi
         done
+        if [ "$all_exist" -eq 1 ]; then
+            log_message "  Skip BS=${bs}: all ${NUM_RUNS} runs already exist"
+            continue
+        fi
+
+        # ----- Start a fresh SGLang server for this BS -----
+        local server_log
+        server_log=$(unique_log_path "$log_dir/${rot_suffix}_bs${bs}_server.log")
+        log_message "---- BS=${bs}: starting SGLang server on port $server_port (cold radix tree) ----"
+
+        HADAMARD=$hadamard \
+        ROTATE_V=$rotate_v \
+        HADAMARD_ORDER=$hadamard_order \
+        SGLANG_FUSE_HADAMARD_INT4_KV="$fuse_hadamard" \
+        CUDA_VISIBLE_DEVICES=$gpu_devices \
+        PATH="$(dirname "$PYTHON"):$PATH" \
+        LIBRARY_PATH="/usr/local/cuda/targets/x86_64-linux/lib${LIBRARY_PATH:+:$LIBRARY_PATH}" \
+        LD_LIBRARY_PATH="/usr/local/cuda/targets/x86_64-linux/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+        "$PYTHON" -m sglang.launch_server \
+            --model-path "$model_name" \
+            --mem-fraction-static "$mem_fraction" \
+            --kv-cache-dtype "$kv_cache_dtype" \
+            "${ATTN_ARGS[@]}" \
+            "${EXTRA_KV_ARGS[@]}" \
+            --sampling-backend flashinfer \
+            --tensor-parallel-size "$tp_size" \
+            --expert-parallel-size "$ep_size" \
+            --data-parallel-size "$dp_size" \
+            --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 119}' \
+            --host 0.0.0.0 \
+            --port "$server_port" \
+            --trust-remote-code \
+            --log-requests \
+            --log-requests-level 0 \
+            --enable-request-time-stats-logging \
+            --enable-cache-report \
+            --chunked-prefill-size 32768 \
+            --max-running-requests 512 \
+            > "$server_log" 2>&1 &
+        local server_pid=$!
+        log_message "  [BS=${bs}] Server PID=$server_pid, log=$(basename "$server_log")"
+
+        if ! wait_for_server "$server_port" "$server_pid" "SGLang server (BS=$bs)"; then
+            tail -50 "$server_log" | tee -a "$BATCH_LOG_FILE"
+            stop_server "$server_pid" "SGLang server (BS=$bs)"
+            overall_exit=1
+            sleep 10 &
+            wait $!
+            continue
+        fi
+
+        # ----- Run NUM_RUNS passes back-to-back against this fresh server -----
+        for run_idx in $(seq 1 "$NUM_RUNS"); do
+            local csv_path="${result_dir}/bs${bs}_${HF_DATASET_LABEL}_run${run_idx}.csv"
+
+            # Skip if result already exists
+            if [ -f "$csv_path" ]; then
+                log_message "  Skip BS=${bs} run=${run_idx}: $csv_path already exists"
+                continue
+            fi
+
+            # Record server log line count before this run for stats extraction
+            local log_line_before
+            log_line_before=$(wc -l < "$server_log" 2>/dev/null || echo 0)
+
+            log_message "  BS=${bs}  dataset=${HF_DATASET_LABEL}  run=${run_idx}/${NUM_RUNS}  examples=${num_examples}  max_tokens=${MAX_TOKENS}"
+            set +e
+            cd "$SCRIPT_DIR"
+            CUDA_VISIBLE_DEVICES="" \
+            "$PYTHON" -m tore_speed_eval.eval \
+                --provider=vllm \
+                --base_url="http://localhost:${server_port}/v1" \
+                --api_key="" \
+                --model_name="$model_name" \
+                --evaluation_output_path="$csv_path" \
+                --dataset_type=hf \
+                --hf_dataset="$HF_DATASET" \
+                --hf_dataset_column_name=messages \
+                --stream=true \
+                --chat=true \
+                --temperature="$eff_temperature" \
+                --top_p="$eff_top_p" \
+                --num_gpus="$tp_size" \
+                --concurrency="$bs" \
+                --num_examples="$num_examples" \
+                --max_tokens="$MAX_TOKENS" \
+                2>&1 | tee -a "$BATCH_LOG_FILE"
+            local eval_exit=${PIPESTATUS[0]}
+            set -e
+
+            if [ $eval_exit -ne 0 ]; then
+                log_message "  ✗ BS=${bs} run=${run_idx} failed (exit: $eval_exit)"
+                overall_exit=$eval_exit
+            else
+                log_message "  ✓ BS=${bs} run=${run_idx} -> $csv_path"
+            fi
+
+            # Extract per-request TPS / OTPS / TTFT / cache-hit from server log for this run
+            extract_per_request_stats \
+                "$server_log" "$log_line_before" "$rot_suffix" \
+                "$bs" "${HF_DATASET_LABEL}_run${run_idx}" "$stats_log"
+        done
+
+        # ----- Stop server + cool down before next BS -----
+        stop_server "$server_pid" "SGLang server (BS=$bs)"
+        sleep 10 &
+        wait $!
     done
 
-    stop_server "$server_pid" "SGLang server"
     return $overall_exit
 }
 
@@ -589,11 +549,10 @@ echo "[$(date '+%Y-%m-%d %H:%M:%S')] =========================================="
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] KV-cache Rotation Throughput Benchmark"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Configs:       ${#MODEL_CONFIGS[@]} entry(s)"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Batch sizes:   ${BATCH_SIZES[*]}"
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] Input lens:    ${INPUT_LENS[*]}"
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] Output lens:   ${OUTPUT_LENS[*]}"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Num examples:  ${NUM_EXAMPLES[*]}"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Dataset:       $HF_DATASET (label=$HF_DATASET_LABEL)"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Max tokens:    $MAX_TOKENS  Num runs: $NUM_RUNS"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] GPU free threshold: ${GPU_FREE_MEM_MB} MB"
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] KV dump base:  ${KV_DUMP_BASE}"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] =========================================="
 echo ""
 
@@ -607,7 +566,6 @@ for i in "${!MODEL_CONFIGS[@]}"; do
     config="${MODEL_CONFIGS[$i]}"
     # Strip whitespace from each field (allows aligned formatting in MODEL_CONFIGS)
     IFS='|' read -r fuse_hadamard mode hadamard rotate_v hadamard_order kv_dtype model_name \
-                    n_clusters \
                     gpu_devices tp_size ep_size dp_size <<< "$config"
     fuse_hadamard="${fuse_hadamard// /}"
     mode="${mode// /}"
@@ -616,33 +574,26 @@ for i in "${!MODEL_CONFIGS[@]}"; do
     hadamard_order="${hadamard_order// /}"
     kv_dtype="${kv_dtype// /}"
     model_name="${model_name// /}"
-    n_clusters="${n_clusters// /}"
     gpu_devices="${gpu_devices// /}"
     tp_size="${tp_size// /}"
     ep_size="${ep_size// /}"
     dp_size="${dp_size// /}"
 
-    # Lookup num_layers; error if model not registered
-    num_layers="${MODEL_NUM_LAYERS[$model_name]}"
-    if [[ -z "$num_layers" ]]; then
-        echo "ERROR: model '$model_name' not found in MODEL_NUM_LAYERS table."
-        echo "       Add it at the top of this script and retry."
+    # Validate mode
+    if [[ "$mode" != "BASE" && "$mode" != "QUANT" ]]; then
+        echo "ERROR: config [$i] mode must be BASE or QUANT, got '$mode'"
         exit 1
     fi
 
     model_short="$(extract_model_short_name "$model_name")"
     kv_dtype_lower="${kv_dtype,,}"
+
+    # Build rot_suffix preview for the label (must match benchmark_single_model's logic)
     fuse_suffix=$([[ "$fuse_hadamard" == "1" ]] && echo "fused_finetuned_v2" || echo "unfused")
     if [[ "$mode" == "BASE" ]]; then
         rot_suffix="baseline_${kv_dtype_lower}"
-    elif [[ "$mode" == "QUANT" ]]; then
-        rot_suffix="quant_${kv_dtype_lower}_${hadamard}_${rotate_v}_${hadamard_order}_${fuse_suffix}"
     else
-        if [[ "$hadamard" == "0" && "$rotate_v" == "0" ]]; then
-            rot_suffix="kmeans_${n_clusters}"
-        else
-            rot_suffix="kmeans_quant_${n_clusters}_${kv_dtype_lower}_${hadamard}_${rotate_v}_${hadamard_order}_${fuse_suffix}"
-        fi
+        rot_suffix="quant_${kv_dtype_lower}_${hadamard}_${rotate_v}_${hadamard_order}_${fuse_suffix}"
     fi
 
     server_port=$((BASE_PORT + i))
@@ -655,7 +606,7 @@ for i in "${!MODEL_CONFIGS[@]}"; do
 
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] Launching: $label"
     benchmark_single_model "$mode" "$hadamard" "$rotate_v" "$hadamard_order" "$kv_dtype" \
-                           "$model_name" "$num_layers" "$n_clusters" \
+                           "$model_name" \
                            "$tp_size" "$ep_size" "$dp_size" "$gpu_devices" \
                            "$server_port" "$fuse_hadamard" &
     PIDS[$i]=$!
@@ -663,8 +614,8 @@ for i in "${!MODEL_CONFIGS[@]}"; do
     # If next config shares any GPU, wait for current job to finish first
     next=$((i + 1))
     if [ "$next" -lt "$N" ]; then
-        # eval_gpus is field 9 in the new format (fuse|mode|hadamard|rotate_v|hadamard_order|kv_dtype|model_name|n_clusters|eval_gpus|...)
-        next_gpu=$(echo "${MODEL_CONFIGS[$next]}" | cut -d'|' -f9 | tr -d ' ')
+        # eval_gpus is field 8 in our schema (fuse|mode|hadamard|rotate_v|hadamard_order|kv_dtype|model_name|eval_gpus|...)
+        next_gpu=$(echo "${MODEL_CONFIGS[$next]}" | cut -d'|' -f8 | tr -d ' ')
         overlap=0
         IFS=',' read -ra CUR_GPUS <<< "$gpu_devices"
         IFS=',' read -ra NXT_GPUS <<< "$next_gpu"

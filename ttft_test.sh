@@ -39,6 +39,13 @@ INPUT_LENS=(8192 16384 32768)
 OUTPUT_LENS=(10)
 NUM_EXAMPLES=32
 
+# Sampling parameters (applied to both warmup and main eval)
+# Empty → auto-pick per-model-family defaults in benchmark_single_model:
+#   Qwen series → 0.7 / 0.95
+#   GLM series  → 1.0 / 0.7
+TEMPERATURE="${TEMPERATURE:-}"
+TOP_P="${TOP_P:-}"
+
 # =============================================================================
 # Model Configs
 # =============================================================================
@@ -58,24 +65,11 @@ NUM_EXAMPLES=32
 #   eval_dp       : data parallel size
 #
 MODEL_CONFIGS=(
-    # ---- Qwen/Qwen3-8B ----------------------------------------
-    # Baseline BF16 KV
-    # "0|BASE  |0|0|0  |BF16|Qwen/Qwen3-8B|0|0,1,2,3,4,5,6,7|2|1|4"
-    # "0|BASE  |0|0|0  |INT4|Qwen/Qwen3-8B|0|0,1,2,3,4,5,6,7|2|1|4"
-    # "1|QUANT |1|0|16|INT4|Qwen/Qwen3-8B|0|0,1,2,3,4,5,6,7|2|1|4"
-    # "1|QUANT |1|0|128|INT4|Qwen/Qwen3-8B|0|0,1,2,3,4,5,6,7|2|1|4"
-    # "0|BASE  |0|0|0  |BF16|Qwen/Qwen3-32B|0|0,1,2,3,4,5,6,7|2|1|4"
-    # "0|BASE  |0|0|0  |INT4|Qwen/Qwen3-32B|0|0,1,2,3,4,5,6,7|2|1|4"
-    # "1|QUANT |1|0|16|INT4|Qwen/Qwen3-32B|0|0,1,2,3,4,5,6,7|2|1|4"
-    # "1|QUANT |1|0|128|INT4|Qwen/Qwen3-32B|0|0,1,2,3,4,5,6,7|2|1|4"
-    # "0|BASE  |0|0|0  |BF16|zai-org/GLM-4.7-FP8|0|0,1,2,3,4,5,6,7|8|1|1"
-    # "0|BASE  |0|0|0  |INT4|zai-org/GLM-4.7-FP8|0|0,1,2,3,4,5,6,7|8|1|1"
-    # "1|QUANT |1|0|16|INT4|zai-org/GLM-4.7-FP8|0|0,1,2,3,4,5,6,7|8|1|1"
-    # "1|QUANT |1|0|128|INT4|zai-org/GLM-4.7-FP8|0|0,1,2,3,4,5,6,7|8|1|1"
-    "0|BASE |0|0|0|BF16|Qwen/Qwen3-4B-Thinking-2507|0|0,1,2,3,4,5,6,7|2|1|4"
-    "0|BASE |0|0|0|INT4|Qwen/Qwen3-4B-Thinking-2507|0|0,1,2,3,4,5,6,7|2|1|4"
-    "1|QUANT |1|0|128|INT4|Qwen/Qwen3-4B-Thinking-2507|0|0,1,2,3,4,5,6,7|2|1|4"
-    "0|QUANT |1|0|128|INT4|Qwen/Qwen3-4B-Thinking-2507|0|0,1,2,3,4,5,6,7|2|1|4"
+    # ---- INT4 fused kernel, hadamard=1 rotate_v=1 order=16 (donglin-equivalent) ----
+    # 4B / 8B run in parallel on GPU 0 / 1 (TP=1); GLM-4.7 runs after on all 8 GPUs (TP=8)
+    # "1|QUANT|1|1|16|INT4|Qwen/Qwen3-4B-Thinking-2507|0|2|1|1|1"
+    # "1|QUANT|1|1|16|INT4|Qwen/Qwen3-8B|0|3|1|1|1"
+    # "1|QUANT|1|1|16|INT4|zai-org/GLM-4.7-FP8|0|0,1,2,3,4,5,6,7|8|1|1"
 )
 
 # =============================================================================
@@ -102,8 +96,8 @@ DUMP_TOKENS=20000
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TORE_SPEED_EVAL_DIR="$SCRIPT_DIR/tore-speed-eval"
-RESULTS_DIR="$SCRIPT_DIR/ttft_results"
-LOGS_DIR="$SCRIPT_DIR/ttft_logs"
+RESULTS_DIR="$SCRIPT_DIR/ttft_results_TP1"
+LOGS_DIR="$SCRIPT_DIR/ttft_logs_TP1"
 
 export HF_HOME=/data/shared/huggingface
 
@@ -113,7 +107,9 @@ CONDA_ENV_DIR="$CONDA_BASE/envs/$CONDA_ENV_NAME"
 PYTHON="$CONDA_ENV_DIR/bin/python3"
 
 export TRITON_CACHE_DIR="/dev/shm/triton_cache_$USER"
-export FLASHINFER_CACHE_DIR="/data/$USER/.cache/flashinfer"
+# flashinfer reads FLASHINFER_WORKSPACE_BASE (not FLASHINFER_CACHE_DIR) per flashinfer/jit/env.py
+# — derives cache to $FLASHINFER_WORKSPACE_BASE/.cache/flashinfer/
+export FLASHINFER_WORKSPACE_BASE="/data/$USER"
 export SGLANG_DISABLE_FLASHINFER_TRTLLM_AR_FUSION=1
 
 GPU_FREE_MEM_MB="${GPU_FREE_MEM_MB:-500}"
@@ -238,26 +234,29 @@ extract_per_request_stats() {
         return
     fi
 
-    # Parse TPS, OTPS, TTFT from Finish: lines with Python
-    # Fields (order not fixed, use regex):
-    #   prompt_tokens, completion_tokens, e2e_latency
-    #   request_received_ts, prefill_finished_ts (or api_server_dispatch_finish_ts)
+    # Parse TPS + RUNNING_REQS from Finish:/#running-req lines with Python.
+    # NOTE: new SGLang dropped prefill_finished_ts / request_received_ts fields from the
+    # Finish: log, so OTPS and TTFT can no longer be derived from server log.
+    # Refer to tore-speed-eval CSV (ttft_mean / user_tps_mean) for those metrics instead.
     echo "$run_log" \
-        | grep "Finish:" \
+        | grep -E "Finish:|#running-req" \
         | grep -v "HEALTH_CHECK" \
         | "$PYTHON" -c "
 import sys, re
 
-tps_vals, otps_vals, ttft_vals = [], [], []
+tps_vals = []
+running_req_vals = []
 
 for line in sys.stdin:
+    # Scheduler periodic log line: 'Decode batch. #running-req: N. #token: ...'
+    rr = re.search(r'#running-req:\s*(\d+)', line)
+    if rr:
+        running_req_vals.append(int(rr.group(1)))
+        continue
+
     pt   = re.search(r\"'prompt_tokens': (\d+)\", line)
     ct   = re.search(r\"'completion_tokens': (\d+)\", line)
     e2e  = re.search(r\"'e2e_latency': ([\d.]+)\", line)
-    recv = re.search(r\"'request_received_ts': ([\d.]+)\", line)
-    # prefer prefill_finished_ts; fall back to api_server_dispatch_finish_ts
-    pf   = re.search(r\"'prefill_finished_ts': ([\d.]+)\", line) or \
-           re.search(r\"'api_server_dispatch_finish_ts': ([\d.]+)\", line)
 
     if not (pt and ct and e2e):
         continue
@@ -266,13 +265,6 @@ for line in sys.stdin:
         continue
 
     tps_vals.append((p + c) / lat)
-
-    if recv and pf:
-        ttft = float(pf.group(1)) - float(recv.group(1))
-        ttft_vals.append(ttft)
-        decode_time = lat - ttft
-        if decode_time > 0 and c > 0:
-            otps_vals.append(c / decode_time)
 
 def summarize(vals, label, unit):
     if not vals:
@@ -286,9 +278,8 @@ def summarize(vals, label, unit):
     p95  = vals_s[min(n-1, int(n * 0.95))]
     print(f'  {label} [{unit}]: Mean={mean:.3f}  P50={p50:.3f}  P05={p05:.3f}  P95={p95:.3f}  n={n}')
 
-summarize(tps_vals,  'TPS  (prompt+output / e2e)',    'tok/s')
-summarize(otps_vals, 'OTPS (output / decode_time)',   'tok/s')
-summarize(ttft_vals, 'TTFT (prefill_finished-recv)',  's')
+summarize(tps_vals,         'TPS  (prompt+output / e2e)',     'tok/s')
+summarize(running_req_vals, 'RUNNING_REQS (server in-flight)', 'reqs')
 " 2>&1 | tee -a "$stats_log"
 }
 
@@ -331,6 +322,16 @@ benchmark_single_model() {
     if [[ "$mode" != "BASE" && "$mode" != "QUANT" && "$mode" != "KMEANS" ]]; then
         echo "ERROR: mode must be BASE, QUANT, or KMEANS, got: '$mode'"
         return 1
+    fi
+
+    # ----- Per-model-family sampling defaults (overridable via TEMPERATURE/TOP_P env) -----
+    local eff_temperature eff_top_p
+    if [[ "$model_name" == *"GLM"* || "$model_name" == *"glm"* ]]; then
+        eff_temperature="${TEMPERATURE:-1.0}"
+        eff_top_p="${TOP_P:-0.7}"
+    else  # Qwen and fallback
+        eff_temperature="${TEMPERATURE:-0.7}"
+        eff_top_p="${TOP_P:-0.95}"
     fi
 
     # BASE: force no rotation
@@ -403,6 +404,12 @@ benchmark_single_model() {
     local server_log
     server_log=$(unique_log_path "$log_dir/${rot_suffix}_server.log")
 
+    # GLM-4.7 chat parsing flags (tool calls / reasoning) per zai-org's recommended launch.
+    local EXTRA_LAUNCH_ARGS=()
+    if [[ "$model_name" == *GLM* || "$model_name" == *glm* ]]; then
+        EXTRA_LAUNCH_ARGS+=(--tool-call-parser glm47 --reasoning-parser glm45)
+    fi
+
     HADAMARD=$hadamard \
     ROTATE_V=$rotate_v \
     HADAMARD_ORDER=$hadamard_order \
@@ -423,6 +430,7 @@ benchmark_single_model() {
         --tensor-parallel-size "$tp_size" \
         --expert-parallel-size "$ep_size" \
         --data-parallel-size "$dp_size" \
+        --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 119}' \
         --host 0.0.0.0 \
         --port "$server_port" \
         --trust-remote-code \
@@ -432,6 +440,8 @@ benchmark_single_model() {
         --disable-radix-cache \
         --chunked-prefill-size 32768 \
         --max-prefill-tokens 131072 \
+        --max-running-requests 512 \
+        "${EXTRA_LAUNCH_ARGS[@]}" \
         > "$server_log" 2>&1 &
     local server_pid=$!
     log_message "Server started (PID: $server_pid)"
@@ -465,8 +475,8 @@ benchmark_single_model() {
         --synthetic_input_length=1024 \
         --synthetic_output_length=128 \
         --stream=true \
-        --temperature=1.0 \
-        --top_p=0.7 \
+        --temperature="$eff_temperature" \
+        --top_p="$eff_top_p" \
         --num_gpus=1 \
         --concurrency=1 \
         --num_examples=8 \
@@ -513,8 +523,8 @@ benchmark_single_model() {
                     --synthetic_input_length="$input_len" \
                     --synthetic_output_length="$output_len" \
                     --stream=true \
-                    --temperature=1.0 \
-                    --top_p=0.95 \
+                    --temperature="$eff_temperature" \
+                    --top_p="$eff_top_p" \
                     --num_gpus="$tp_size" \
                     --concurrency="$bs" \
                     --num_examples="$num_examples" \
@@ -563,7 +573,7 @@ fi
 # 3. tore_speed_eval installed; install from submodule if not (use pip show, not python import — avoids slow torch load)
 if ! "$CONDA_ENV_DIR/bin/pip" show tore-speed-eval &>/dev/null; then
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] tore_speed_eval not found — installing from submodule..."
-    "$CONDA_ENV_DIR/bin/pip" install -e "$TORE_SPEED_EVAL_DIR" -q
+    "$CONDA_ENV_DIR/bin/pip" install -e "$TORE_SPEED_EVAL_DIR"
     if ! "$CONDA_ENV_DIR/bin/pip" show tore-speed-eval &>/dev/null; then
         echo "ERROR: tore_speed_eval install failed."
         exit 1
