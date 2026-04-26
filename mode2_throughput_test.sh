@@ -69,7 +69,7 @@ TOP_P="${TOP_P:-}"
 MODEL_CONFIGS=(
     # ---- INT4 fused kernel, hadamard=1 rotate_v=1 order=16 (donglin-equivalent), TP=1 ----
     "1|QUANT|1|1|16|INT4|Qwen/Qwen3-4B-Thinking-2507|0|1|1|1"
-    # "1|QUANT|1|1|16|INT4|Qwen/Qwen3-8B|1|1|1|1"
+    "1|QUANT|1|1|16|INT4|Qwen/Qwen3-8B|4|1|1|1"
     # "1|QUANT|1|1|16|INT4|zai-org/GLM-4.7-FP8|0,1,2,3,4,5,6,7|8|1|1"
 )
 
@@ -372,6 +372,22 @@ benchmark_single_model() {
     # GLM-4.7 chat parsing flags (tool calls / reasoning) per zai-org's recommended launch.
     if [[ "$model_name" == *GLM* || "$model_name" == *glm* ]]; then
         EXTRA_KV_ARGS+=(--tool-call-parser glm47 --reasoning-parser glm45)
+    fi
+
+    # YaRN RoPE scaling for Qwen3 models with 32k native context (Qwen3-8B / Qwen3-32B).
+    # narrativeqa-100k prompts can exceed 32k → extend to 131072 with YaRN factor=4.0.
+    # Qwen3-4B-Thinking-2507 already has 256k native context — skip.
+    if [[ "$model_name" == "Qwen/Qwen3-8B" || "$model_name" == "Qwen/Qwen3-32B" ]]; then
+        # Note: rope_theta MUST be included; transformers v5 normalizes rope_scaling
+        # into rope_parameters by replacement (not merge), so omitting rope_theta
+        # makes newer SGLang qwen3.py raise KeyError: 'rope_theta'.
+        # --context-length is required: SGLang reads max_position_embeddings (40960)
+        # from config.json and does NOT auto-extend it from YaRN factor=4.
+        # SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1 bypasses SGLang's safety check
+        # that refuses --context-length > derived value.
+        EXTRA_KV_ARGS+=(--json-model-override-args '{"rope_scaling":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":32768,"rope_theta":1000000}}'
+                        --context-length 131072)
+        export SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN=1
     fi
 
     # Default attention backend: fa3 for prefill + triton for decode
