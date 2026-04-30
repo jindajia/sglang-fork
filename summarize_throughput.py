@@ -24,13 +24,36 @@ def _f(row: dict, key: str):
     return float(v) if v else None
 
 
-def load_metrics(csv_path: Path):
-    """Return a dict of metrics from first data row, or None on failure."""
+def _invert_legacy_hit(b):
+    """Invert cache-hit-ratio recorded with old formula on old SGLang.
+
+    Old fused tore-speed-eval: b = cached / (cached + prompt_tokens), where
+    old SGLang reports prompt_tokens = total prompt = cached + new.
+    Real (OpenAI) ratio = cached / prompt_total = b / (1 - b).
+    Domain: b in [0, 0.5]. b=0.5 → real=1, b=0 → real=0.
+    """
+    if b is None:
+        return None
+    if b >= 0.5:
+        return 1.0
+    if b <= 0:
+        return 0.0
+    return b / (1.0 - b)
+
+
+def load_metrics(csv_path: Path, legacy_cache_hit: bool = False):
+    """Return a dict of metrics from first data row, or None on failure.
+
+    legacy_cache_hit=True: applies real = b / (1 - b) to all cache_hit_ratio_*
+    fields (mean/percentiles), and re-derives stdev via delta method
+    σ_real ≈ σ_b / (1 - b_mean)². Use this when CSVs were produced by the
+    older fused tore-speed-eval formula on old-SGLang prompt_tokens semantics.
+    """
     try:
         with open(csv_path, newline="") as f:
             reader = csv.DictReader(f)
             for row in reader:
-                return {
+                m = {
                     "otps_mean":          _f(row, "user_tps_mean"),
                     "otps_std":           _f(row, "user_tps_stdev"),
                     "otps_p05":           _f(row, "user_tps_p05"),
@@ -54,6 +77,16 @@ def load_metrics(csv_path: Path):
                     "per_gpu_tps_mean":   _f(row, "per_gpu_tps_mean"),
                     "per_gpu_tps_stdev":  _f(row, "per_gpu_tps_stdev"),
                 }
+                if legacy_cache_hit:
+                    b_mean = m["hit_mean"]
+                    # Convert mean and percentiles point-wise (monotonic transform)
+                    for k in ("hit_mean", "hit_p05", "hit_p50", "hit_p80", "hit_p95", "hit_p99"):
+                        m[k] = _invert_legacy_hit(m[k])
+                    # Delta-method approximation for stdev: |f'(b)| × σ_b at b_mean,
+                    # where f(b) = b/(1-b), f'(b) = 1/(1-b)².
+                    if m["hit_std"] is not None and b_mean is not None and b_mean < 0.5:
+                        m["hit_std"] = m["hit_std"] / (1.0 - b_mean) ** 2
+                return m
     except Exception as exc:
         print(f"  WARNING: cannot read {csv_path}: {exc}", file=sys.stderr)
     return None
@@ -77,11 +110,12 @@ _CSV_RE = re.compile(r"^bs(\d+)_(.+)\.csv$")
 _BS_ORDER = [1, 8, 16, 32]
 
 
-def render_config_table(config_dir: Path, cache_hit: bool = False) -> str:
+def render_config_table(config_dir: Path, cache_hit: bool = False, legacy_cache_hit: bool = False) -> str:
     """Build a Markdown table from all CSVs found in a config directory.
 
     If cache_hit=True, replace the OTPS percentile columns with cache-hit-ratio
     percentile columns (useful for Mode 2 prefix-cache benchmarks).
+    If legacy_cache_hit=True, invert the old-formula b → b/(1-b) on read.
     """
     rows_data = []
     for csv_path in sorted(config_dir.glob("bs*.csv")):
@@ -90,7 +124,7 @@ def render_config_table(config_dir: Path, cache_hit: bool = False) -> str:
             continue
         bs      = int(m.group(1))
         shape   = m.group(2)
-        metrics = load_metrics(csv_path)
+        metrics = load_metrics(csv_path, legacy_cache_hit=legacy_cache_hit)
         rows_data.append((bs, shape, metrics))
 
     if not rows_data:
@@ -197,6 +231,13 @@ def main():
         help="Replace OTPS percentile columns with cache-hit-ratio percentile columns "
              "(for Mode 2 prefix-cache benchmarks).",
     )
+    parser.add_argument(
+        "--legacy-cache-hit",
+        action="store_true",
+        help="CSVs were written with the old fused-tore-speed-eval formula on old "
+             "SGLang prompt_tokens semantics. Apply real = b/(1-b) inverse on read "
+             "to recover OpenAI-standard cache_hit_ratio.",
+    )
     args = parser.parse_args()
 
     base = Path(args.results_dir)
@@ -238,7 +279,7 @@ def main():
         for config_dir in config_dirs:
             lines.append(f"### {config_dir.name}")
             lines.append("")
-            lines.append(render_config_table(config_dir, cache_hit=args.cache_hit))
+            lines.append(render_config_table(config_dir, cache_hit=args.cache_hit, legacy_cache_hit=args.legacy_cache_hit))
             lines.append("")
 
     md = "\n".join(lines)
