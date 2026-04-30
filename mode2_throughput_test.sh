@@ -67,10 +67,11 @@ TOP_P="${TOP_P:-}"
 #   eval_dp       : data parallel size
 #
 MODEL_CONFIGS=(
-    # ---- INT4 fused kernel, hadamard=1 rotate_v=1 order=16 (donglin-equivalent), TP=1 ----
-    "1|QUANT|1|1|16|INT4|Qwen/Qwen3-4B-Thinking-2507|0|1|1|1"
-    "1|QUANT|1|1|16|INT4|Qwen/Qwen3-8B|4|1|1|1"
-    # "1|QUANT|1|1|16|INT4|zai-org/GLM-4.7-FP8|0,1,2,3,4,5,6,7|8|1|1"
+    # ---- INT4 fused kernel, hadamard=1 rotate_v=1 order=128 ----
+    # 4B / 8B parallel on GPU 2 / 3 (TP=1)
+    "1|QUANT|1|1|128|INT4|Qwen/Qwen3-4B-Thinking-2507|2|1|1|1"
+    "1|QUANT|1|1|128|INT4|Qwen/Qwen3-8B|3|1|1|1"
+    # "1|QUANT|1|1|128|INT4|zai-org/GLM-4.7-FP8|0,1,2,3,4,5,6,7|8|1|1"
 )
 
 # =============================================================================
@@ -81,8 +82,8 @@ BASE_PORT=32100
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TORE_SPEED_EVAL_DIR="$SCRIPT_DIR/tore-speed-eval"
-RESULTS_DIR="${RESULTS_DIR:-$SCRIPT_DIR/mode2_throughput_results}"
-LOGS_DIR="${LOGS_DIR:-$SCRIPT_DIR/mode2_throughput_logs}"
+RESULTS_DIR="${RESULTS_DIR:-$SCRIPT_DIR/ho128_mode2_throughput_results}"
+LOGS_DIR="${LOGS_DIR:-$SCRIPT_DIR/ho128_mode2_throughput_logs}"
 
 export HF_HOME=/data/shared/huggingface
 
@@ -219,17 +220,17 @@ extract_per_request_stats() {
         return
     fi
 
-    # Parse TPS, OTPS, TTFT from Finish: lines with Python
-    # Fields (order not fixed, use regex):
-    #   prompt_tokens, completion_tokens, e2e_latency
-    #   request_received_ts, prefill_finished_ts (or api_server_dispatch_finish_ts)
+    # Parse TPS / cache-hit / RUNNING_REQS from Finish: lines.
+    # NOTE: new SGLang dropped prefill_finished_ts / request_received_ts fields from
+    # the Finish: log, so OTPS and TTFT can no longer be derived from server log here.
+    # Refer to tore-speed-eval CSV (ttft_mean / user_tps_mean) for those metrics instead.
     echo "$run_log" \
         | grep -E "Finish:|#running-req" \
         | grep -v "HEALTH_CHECK" \
         | "$PYTHON" -c "
 import sys, re
 
-tps_vals, otps_vals, ttft_vals = [], [], []
+tps_vals = []
 cache_ratios, cached_tokens_vals = [], []
 running_req_vals = []
 
@@ -243,11 +244,7 @@ for line in sys.stdin:
     pt   = re.search(r\"'prompt_tokens': (\d+)\", line)
     ct   = re.search(r\"'completion_tokens': (\d+)\", line)
     e2e  = re.search(r\"'e2e_latency': ([\d.]+)\", line)
-    recv = re.search(r\"'request_received_ts': ([\d.]+)\", line)
     cached = re.search(r\"'cached_tokens': (\d+)\", line)
-    # prefer prefill_finished_ts; fall back to api_server_dispatch_finish_ts
-    pf   = re.search(r\"'prefill_finished_ts': ([\d.]+)\", line) or \
-           re.search(r\"'api_server_dispatch_finish_ts': ([\d.]+)\", line)
 
     if not (pt and ct and e2e):
         continue
@@ -256,13 +253,6 @@ for line in sys.stdin:
         continue
 
     tps_vals.append((p + c) / lat)
-
-    if recv and pf:
-        ttft = float(pf.group(1)) - float(recv.group(1))
-        ttft_vals.append(ttft)
-        decode_time = lat - ttft
-        if decode_time > 0 and c > 0:
-            otps_vals.append(c / decode_time)
 
     if cached and p > 0:
         cached_n = int(cached.group(1))
@@ -282,13 +272,57 @@ def summarize(vals, label, unit):
     print(f'  {label} [{unit}]: Mean={mean:.3f}  P50={p50:.3f}  P05={p05:.3f}  P95={p95:.3f}  n={n}')
 
 summarize(tps_vals,           'TPS  (prompt+output / e2e)',    'tok/s')
-# NOTE: new SGLang dropped prefill_finished_ts / request_received_ts fields from the
-# Finish: log, so OTPS and TTFT can no longer be derived from server log.
-# Refer to tore-speed-eval CSV (ttft_mean / user_tps_mean) for these metrics instead.
 summarize(cached_tokens_vals, 'CACHED_TOKENS (cache hit)',     'tokens')
 summarize(cache_ratios,       'CACHE_HIT_RATIO',               '(0-1)')
 summarize(running_req_vals,   'RUNNING_REQS (server in-flight)', 'reqs')
 " 2>&1 | tee -a "$stats_log"
+}
+
+# =============================================================================
+# launch_sglang_server — wraps sglang.launch_server invocation.
+#   Args:  $1 server_log path  $2 port  $3 disable_radix ("true"/"false")
+#   Reads from caller's locals: hadamard, rotate_v, hadamard_order, fuse_hadamard,
+#                                gpu_devices, model_name, mem_fraction, kv_cache_dtype,
+#                                ATTN_ARGS, EXTRA_KV_ARGS, tp_size, ep_size, dp_size
+#   Sets:  LAUNCH_PID (caller can read)
+# =============================================================================
+launch_sglang_server() {
+    local server_log="$1" port="$2" disable_radix="$3"
+    local extra_args=()
+    if [[ "$disable_radix" == "true" ]]; then
+        extra_args+=(--disable-radix-cache)
+    fi
+    HADAMARD=$hadamard \
+    ROTATE_V=$rotate_v \
+    HADAMARD_ORDER=$hadamard_order \
+    SGLANG_FUSE_HADAMARD_INT4_KV="$fuse_hadamard" \
+    CUDA_VISIBLE_DEVICES=$gpu_devices \
+    PATH="$(dirname "$PYTHON"):$PATH" \
+    LIBRARY_PATH="/usr/local/cuda/targets/x86_64-linux/lib${LIBRARY_PATH:+:$LIBRARY_PATH}" \
+    LD_LIBRARY_PATH="/usr/local/cuda/targets/x86_64-linux/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+    "$PYTHON" -m sglang.launch_server \
+        --model-path "$model_name" \
+        --mem-fraction-static "$mem_fraction" \
+        --kv-cache-dtype "$kv_cache_dtype" \
+        "${ATTN_ARGS[@]}" \
+        "${EXTRA_KV_ARGS[@]}" \
+        "${extra_args[@]}" \
+        --sampling-backend flashinfer \
+        --tensor-parallel-size "$tp_size" \
+        --expert-parallel-size "$ep_size" \
+        --data-parallel-size "$dp_size" \
+        --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 119}' \
+        --host 0.0.0.0 \
+        --port "$port" \
+        --trust-remote-code \
+        --log-requests \
+        --log-requests-level 0 \
+        --enable-request-time-stats-logging \
+        --enable-cache-report \
+        --chunked-prefill-size 32768 \
+        --max-running-requests 512 \
+        > "$server_log" 2>&1 &
+    LAUNCH_PID=$!
 }
 
 # =============================================================================
@@ -369,10 +403,6 @@ benchmark_single_model() {
     # ------------------------------------------------------------------
     local mem_fraction="0.8"
     local EXTRA_KV_ARGS=()
-    # GLM-4.7 chat parsing flags (tool calls / reasoning) per zai-org's recommended launch.
-    if [[ "$model_name" == *GLM* || "$model_name" == *glm* ]]; then
-        EXTRA_KV_ARGS+=(--tool-call-parser glm47 --reasoning-parser glm45)
-    fi
 
     # YaRN RoPE scaling for Qwen3 models with 32k native context (Qwen3-8B / Qwen3-32B).
     # narrativeqa-100k prompts can exceed 32k → extend to 131072 with YaRN factor=4.0.
@@ -403,6 +433,97 @@ benchmark_single_model() {
     # ------------------------------------------------------------------
     local stats_log="${result_dir}/per_request_stats.log"
     local overall_exit=0
+
+    # ==================================================================
+    # Phase 0: noradix run0 — single long-lived server, sweep all BS once.
+    # Provides a "no-cache baseline" reference: each (model, dtype, BS) run0
+    # CSV measures throughput WITHOUT prefix-cache benefits.
+    # ==================================================================
+    local need_phase0=0
+    for bs in "${BATCH_SIZES[@]}"; do
+        if [ ! -f "${result_dir}/bs${bs}_${HF_DATASET_LABEL}_run0.csv" ]; then
+            need_phase0=1
+            break
+        fi
+    done
+
+    if [ "$need_phase0" -eq 1 ]; then
+        local phase0_port=$((server_port + 1000))
+        local phase0_log
+        phase0_log=$(unique_log_path "$log_dir/${rot_suffix}_run0_server.log")
+        log_message "---- Phase 0 (run0, --disable-radix-cache): starting server on port $phase0_port ----"
+        launch_sglang_server "$phase0_log" "$phase0_port" "true"
+        local phase0_pid=$LAUNCH_PID
+        log_message "  Phase 0 server PID=$phase0_pid, log=$(basename "$phase0_log")"
+
+        if wait_for_server "$phase0_port" "$phase0_pid" "Phase 0 server (run0)"; then
+            for idx in "${!BATCH_SIZES[@]}"; do
+                bs="${BATCH_SIZES[$idx]}"
+                local num_examples_p0="${NUM_EXAMPLES[$idx]}"
+                local csv_path_p0="${result_dir}/bs${bs}_${HF_DATASET_LABEL}_run0.csv"
+
+                if [ -f "$csv_path_p0" ]; then
+                    log_message "  Skip BS=${bs} run=0: $csv_path_p0 already exists"
+                    continue
+                fi
+
+                local log_line_before_p0
+                log_line_before_p0=$(wc -l < "$phase0_log" 2>/dev/null || echo 0)
+
+                log_message "  BS=${bs}  dataset=${HF_DATASET_LABEL}  run=0  examples=${num_examples_p0}  max_tokens=${MAX_TOKENS}  (noradix)"
+                set +e
+                cd "$SCRIPT_DIR"
+                CUDA_VISIBLE_DEVICES="" \
+                "$PYTHON" -m tore_speed_eval.eval \
+                    --provider=vllm \
+                    --base_url="http://localhost:${phase0_port}/v1" \
+                    --api_key="" \
+                    --model_name="$model_name" \
+                    --evaluation_output_path="$csv_path_p0" \
+                    --dataset_type=hf \
+                    --hf_dataset="$HF_DATASET" \
+                    --hf_dataset_column_name=messages \
+                    --stream=true \
+                    --chat=true \
+                    --temperature="$eff_temperature" \
+                    --top_p="$eff_top_p" \
+                    --num_gpus="$tp_size" \
+                    --concurrency="$bs" \
+                    --num_examples="$num_examples_p0" \
+                    --max_tokens="$MAX_TOKENS" \
+                    2>&1 | tee -a "$BATCH_LOG_FILE"
+                local eval_exit_p0=${PIPESTATUS[0]}
+                set -e
+
+                if [ $eval_exit_p0 -ne 0 ]; then
+                    log_message "  ✗ BS=${bs} run=0 failed (exit: $eval_exit_p0)"
+                    overall_exit=$eval_exit_p0
+                else
+                    log_message "  ✓ BS=${bs} run=0 -> $csv_path_p0"
+                fi
+
+                extract_per_request_stats \
+                    "$phase0_log" "$log_line_before_p0" "$rot_suffix" \
+                    "$bs" "${HF_DATASET_LABEL}_run0" "$stats_log"
+            done
+
+            stop_server "$phase0_pid" "Phase 0 server (run0)"
+        else
+            tail -50 "$phase0_log" | tee -a "$BATCH_LOG_FILE"
+            stop_server "$phase0_pid" "Phase 0 server (run0)"
+            log_message "✗ Phase 0 server failed; skipping run0 and continuing with run1+"
+            overall_exit=1
+        fi
+        sleep 10 &
+        wait $!
+    else
+        log_message "---- Phase 0 skipped: all run0 CSVs already exist ----"
+    fi
+
+    # ==================================================================
+    # Phase 1+: per-BS server restart (radix-cache enabled) for cold→warm
+    # measurement. Each BS gets a fresh server; NUM_RUNS passes share it.
+    # ==================================================================
     for idx in "${!BATCH_SIZES[@]}"; do
         bs="${BATCH_SIZES[$idx]}"
         local num_examples="${NUM_EXAMPLES[$idx]}"
@@ -420,41 +541,12 @@ benchmark_single_model() {
             continue
         fi
 
-        # ----- Start a fresh SGLang server for this BS -----
+        # ----- Start a fresh SGLang server for this BS (radix cache enabled) -----
         local server_log
         server_log=$(unique_log_path "$log_dir/${rot_suffix}_bs${bs}_server.log")
         log_message "---- BS=${bs}: starting SGLang server on port $server_port (cold radix tree) ----"
-
-        HADAMARD=$hadamard \
-        ROTATE_V=$rotate_v \
-        HADAMARD_ORDER=$hadamard_order \
-        SGLANG_FUSE_HADAMARD_INT4_KV="$fuse_hadamard" \
-        CUDA_VISIBLE_DEVICES=$gpu_devices \
-        PATH="$(dirname "$PYTHON"):$PATH" \
-        LIBRARY_PATH="/usr/local/cuda/targets/x86_64-linux/lib${LIBRARY_PATH:+:$LIBRARY_PATH}" \
-        LD_LIBRARY_PATH="/usr/local/cuda/targets/x86_64-linux/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-        "$PYTHON" -m sglang.launch_server \
-            --model-path "$model_name" \
-            --mem-fraction-static "$mem_fraction" \
-            --kv-cache-dtype "$kv_cache_dtype" \
-            "${ATTN_ARGS[@]}" \
-            "${EXTRA_KV_ARGS[@]}" \
-            --sampling-backend flashinfer \
-            --tensor-parallel-size "$tp_size" \
-            --expert-parallel-size "$ep_size" \
-            --data-parallel-size "$dp_size" \
-            --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 119}' \
-            --host 0.0.0.0 \
-            --port "$server_port" \
-            --trust-remote-code \
-            --log-requests \
-            --log-requests-level 0 \
-            --enable-request-time-stats-logging \
-            --enable-cache-report \
-            --chunked-prefill-size 32768 \
-            --max-running-requests 512 \
-            > "$server_log" 2>&1 &
-        local server_pid=$!
+        launch_sglang_server "$server_log" "$server_port" "false"
+        local server_pid=$LAUNCH_PID
         log_message "  [BS=${bs}] Server PID=$server_pid, log=$(basename "$server_log")"
 
         if ! wait_for_server "$server_port" "$server_pid" "SGLang server (BS=$bs)"; then
@@ -512,7 +604,7 @@ benchmark_single_model() {
                 log_message "  ✓ BS=${bs} run=${run_idx} -> $csv_path"
             fi
 
-            # Extract per-request TPS / OTPS / TTFT / cache-hit from server log for this run
+            # Extract per-request TPS / cache-hit from server log for this run
             extract_per_request_stats \
                 "$server_log" "$log_line_before" "$rot_suffix" \
                 "$bs" "${HF_DATASET_LABEL}_run${run_idx}" "$stats_log"

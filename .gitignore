@@ -283,6 +283,6 @@ eval_logs/
 datasets/
 ttft_logs/
 ttft_results/
-throughput_logs/
-throughput_results/
+*_logs/
+*_results/
 *.md

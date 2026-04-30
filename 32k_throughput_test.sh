@@ -1,7 +1,9 @@
 #!/bin/bash
-# throughput_test.sh — SGLang throughput benchmarking with tore-speed-eval
+# 32k_throughput_test.sh — SGLang long-output (32k) throughput with tore-speed-eval
 #
-# Measures OTPS / TPS / TTFT across batch sizes and input lengths.
+# Stress-tests pure decode throughput at very long output (32k tokens).
+# BS=1, in1k, out32k → measures sustained per-stream decode rate.
+# Uses --ignore_eos=true so models don't emit EOS before reaching 32k.
 #
 # Modes: BASE, QUANT, KMEANS  (same naming as eval_quant.sh)
 #   BASE  — no rotation, no kmeans
@@ -13,7 +15,7 @@
 #             Run dump_centroids.sh first to generate them.
 #
 # GPU scheduling: configs on non-overlapping GPUs launch in parallel.
-# Results: ttft_results/{model_short}/{rot_suffix}/bs{N}_{in_label}.csv
+# Results: throughput_results/{model_short}/{rot_suffix}/bs{N}_{in_label}.csv
 
 set -eo pipefail
 
@@ -33,11 +35,10 @@ trap cleanup INT TERM
 # =============================================================================
 # Throughput Test Parameters
 # =============================================================================
-# BATCH_SIZES=(1 8 16 32)
 BATCH_SIZES=(1)
-INPUT_LENS=(8192 16384 32768)
-OUTPUT_LENS=(10)
-NUM_EXAMPLES=32
+INPUT_LENS=(1024)
+OUTPUT_LENS=(32768)
+NUM_EXAMPLES=(8)                    # paired 1:1 with BATCH_SIZES
 
 # Sampling parameters (applied to both warmup and main eval)
 # Empty → auto-pick per-model-family defaults in benchmark_single_model:
@@ -66,7 +67,7 @@ TOP_P="${TOP_P:-}"
 #
 MODEL_CONFIGS=(
     # ---- INT4 fused kernel, hadamard=1 rotate_v=1 order=128 ----
-    # 4B / 8B run in parallel on GPU 2 / 3 (TP=1); GLM-4.7 runs after on all 8 GPUs (TP=8)
+    # 4B / 8B parallel on GPU 2 / 3 (TP=1); 4 scripts spread Qwen configs across GPU 0-7
     "1|QUANT|1|1|128|INT4|Qwen/Qwen3-4B-Thinking-2507|0|2|1|1|1"
     "1|QUANT|1|1|128|INT4|Qwen/Qwen3-8B|0|3|1|1|1"
     # "1|QUANT|1|1|128|INT4|zai-org/GLM-4.7-FP8|0|0,1,2,3,4,5,6,7|8|1|1"
@@ -86,7 +87,7 @@ declare -A MODEL_NUM_LAYERS=(
 # =============================================================================
 # Server & Path Config
 # =============================================================================
-BASE_PORT=31200
+BASE_PORT=31300
 
 # Base directory for KV dump files and centroids (KMEANS mode only)
 KV_DUMP_BASE="${KV_DUMP_BASE:-/data/$USER/kv-cache}"
@@ -96,8 +97,8 @@ DUMP_TOKENS=20000
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TORE_SPEED_EVAL_DIR="$SCRIPT_DIR/tore-speed-eval"
-RESULTS_DIR="$SCRIPT_DIR/ho128_ttft_results"
-LOGS_DIR="$SCRIPT_DIR/ho128_ttft_logs"
+RESULTS_DIR="$SCRIPT_DIR/ho128_32kout_throughput_results"
+LOGS_DIR="$SCRIPT_DIR/ho128_32kout_throughput_logs"
 
 export HF_HOME=/data/shared/huggingface
 
@@ -195,7 +196,7 @@ wait_for_gpus_free() {
     fi
 }
 
-# Convert token count to short label: 8192 → in8k, 16384 → in16k; small values kept as-is: 10 → out10
+# Convert token count to short label: 8192 → in8k, 16384 → in16k, 32768 → in32k
 input_len_label()  { local n=$((${1} / 1024)); [ "$n" -gt 0 ] && echo "in${n}k" || echo "in${1}"; }
 output_len_label() { local n=$((${1} / 1024)); [ "$n" -gt 0 ] && echo "out${n}k" || echo "out${1}"; }
 
@@ -378,7 +379,7 @@ benchmark_single_model() {
     [[ "$mode" == "KMEANS" ]] && log_message "N_CLUSTERS=$n_clusters"
     log_message "Batch sizes:  ${BATCH_SIZES[*]}"
     log_message "Input lens:   ${INPUT_LENS[*]}"
-    log_message "Output lens:  ${OUTPUT_LENS[*]}  num_examples: ${NUM_EXAMPLES}"
+    log_message "Output lens:  ${OUTPUT_LENS[*]}  num_examples: ${NUM_EXAMPLES[*]}"
     log_message "Results dir:  $result_dir"
     log_message "=========================================="
 
@@ -435,7 +436,6 @@ benchmark_single_model() {
         --enable-request-time-stats-logging \
         --disable-radix-cache \
         --chunked-prefill-size 32768 \
-        --max-prefill-tokens 131072 \
         --max-running-requests 512 \
         "${EXTRA_LAUNCH_ARGS[@]}" \
         > "$server_log" 2>&1 &
@@ -477,6 +477,8 @@ benchmark_single_model() {
         --concurrency=1 \
         --num_examples=8 \
         --chat=false \
+        --ignore_eos=true \
+        --max_tokens=128 \
         2>&1 | tee -a "$BATCH_LOG_FILE"
     set -e
     log_message "✓ Warmup done"
@@ -486,7 +488,9 @@ benchmark_single_model() {
     # ------------------------------------------------------------------
     local stats_log="${result_dir}/per_request_stats.log"
     local overall_exit=0
-    for bs in "${BATCH_SIZES[@]}"; do
+    for idx in "${!BATCH_SIZES[@]}"; do
+        bs="${BATCH_SIZES[$idx]}"
+        local num_examples="${NUM_EXAMPLES[$idx]}"
         for input_len in "${INPUT_LENS[@]}"; do
             for output_len in "${OUTPUT_LENS[@]}"; do
                 local label_in label_out
@@ -504,7 +508,6 @@ benchmark_single_model() {
                 local log_line_before
                 log_line_before=$(wc -l < "$server_log" 2>/dev/null || echo 0)
 
-                local num_examples=$NUM_EXAMPLES
                 log_message "  BS=${bs}  input=${label_in}  output=${label_out}  examples=${num_examples}"
                 set +e
                 cd "$SCRIPT_DIR"
@@ -525,6 +528,8 @@ benchmark_single_model() {
                     --concurrency="$bs" \
                     --num_examples="$num_examples" \
                     --chat=false \
+                    --ignore_eos=true \
+                    --max_tokens="$output_len" \
                     2>&1 | tee -a "$BATCH_LOG_FILE"
                 local eval_exit=${PIPESTATUS[0]}
                 set -e
@@ -588,7 +593,7 @@ echo "[$(date '+%Y-%m-%d %H:%M:%S')] Configs:       ${#MODEL_CONFIGS[@]} entry(s
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Batch sizes:   ${BATCH_SIZES[*]}"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Input lens:    ${INPUT_LENS[*]}"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Output lens:   ${OUTPUT_LENS[*]}"
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] Num examples:  ${NUM_EXAMPLES}"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Num examples:  ${NUM_EXAMPLES[*]}"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] GPU free threshold: ${GPU_FREE_MEM_MB} MB"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] KV dump base:  ${KV_DUMP_BASE}"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] =========================================="
@@ -674,11 +679,11 @@ for i in "${!MODEL_CONFIGS[@]}"; do
             echo "[$(date '+%Y-%m-%d %H:%M:%S')] Next config overlaps GPU(s) [$next_gpu], waiting for current job to finish..."
             wait "${PIDS[$i]}"
             EXIT_CODES[$i]=$?
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Cooling down 60s for GPU memory to release..."
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Cooling down 30s for GPU memory to release..."
             sleep 30 &
             wait $!
         else
-            echo "[$(date '+%Y-%m-%d %H:%M:%S')] No GPU overlap with next config, sleeping 60s before launching next..."
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] No GPU overlap with next config, sleeping 30s before launching next..."
             sleep 30 &
             wait $!
         fi

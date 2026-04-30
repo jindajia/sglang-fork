@@ -64,11 +64,11 @@ TOP_P="${TOP_P:-}"
 #   eval_dp       : data parallel size
 #
 MODEL_CONFIGS=(
-    # ---- INT4 fused kernel, hadamard=1 rotate_v=1 order=16 (donglin-equivalent) ----
-    # 4B / 8B run in parallel on GPU 0 / 1 (TP=1); GLM-4.7 runs after on all 8 GPUs (TP=8)
-    # "1|QUANT|1|1|16|INT4|Qwen/Qwen3-4B-Thinking-2507|0|0|1|1|1"
-    # "1|QUANT|1|1|16|INT4|Qwen/Qwen3-8B|0|1|1|1|1"
-    "1|QUANT|1|1|16|INT4|zai-org/GLM-4.7-FP8|0|0,1,2,3,4,5,6,7|8|1|1"
+    # ---- INT4 fused kernel, hadamard=1 rotate_v=1 order=128 ----
+    # 4B / 8B parallel on GPU 2 / 3 (TP=1)
+    "1|QUANT|1|1|128|INT4|Qwen/Qwen3-4B-Thinking-2507|0|2|1|1|1"
+    "1|QUANT|1|1|128|INT4|Qwen/Qwen3-8B|0|3|1|1|1"
+    # "1|QUANT|1|1|128|INT4|zai-org/GLM-4.7-FP8|0|0,1,2,3,4,5,6,7|8|1|1"
 )
 
 # =============================================================================
@@ -95,8 +95,8 @@ DUMP_TOKENS=20000
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TORE_SPEED_EVAL_DIR="$SCRIPT_DIR/tore-speed-eval"
-RESULTS_DIR="$SCRIPT_DIR/throughput_results_TP1"
-LOGS_DIR="$SCRIPT_DIR/throughput_logs_TP1"
+RESULTS_DIR="$SCRIPT_DIR/ho128_throughput_results"
+LOGS_DIR="$SCRIPT_DIR/ho128_throughput_logs"
 
 export HF_HOME=/data/shared/huggingface
 
@@ -403,11 +403,7 @@ benchmark_single_model() {
     local server_log
     server_log=$(unique_log_path "$log_dir/${rot_suffix}_server.log")
 
-    # GLM-4.7 chat parsing flags (tool calls / reasoning) per zai-org's recommended launch.
     local EXTRA_LAUNCH_ARGS=()
-    if [[ "$model_name" == *GLM* || "$model_name" == *glm* ]]; then
-        EXTRA_LAUNCH_ARGS+=(--tool-call-parser glm47 --reasoning-parser glm45)
-    fi
 
     HADAMARD=$hadamard \
     ROTATE_V=$rotate_v \
