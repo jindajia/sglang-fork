@@ -66,9 +66,9 @@ TOP_P="${TOP_P:-}"
 MODEL_CONFIGS=(
     # ---- INT4 fused kernel, hadamard=1 rotate_v=1 order=128 ----
     # 4B / 8B parallel on GPU 2 / 3 (TP=1)
-    "1|QUANT|1|1|128|INT4|Qwen/Qwen3-4B-Thinking-2507|0|2|1|1|1"
-    "1|QUANT|1|1|128|INT4|Qwen/Qwen3-8B|0|3|1|1|1"
-    # "1|QUANT|1|1|128|INT4|zai-org/GLM-4.7-FP8|0|0,1,2,3,4,5,6,7|8|1|1"
+    # "1|QUANT|1|1|128|INT4|Qwen/Qwen3-4B-Thinking-2507|0|2|1|1|1"
+    # "1|QUANT|1|1|128|INT4|Qwen/Qwen3-8B|0|3|1|1|1"
+    "1|QUANT|1|1|128|INT4|zai-org/GLM-4.7-FP8|0|0,1,2,3,4,5,6,7|8|1|1"
 )
 
 # =============================================================================

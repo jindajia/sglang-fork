@@ -38,9 +38,18 @@ NUM_EXAMPLES=(4 32 32 32)                                  # paired 1:1 with BAT
 MAX_TOKENS="${MAX_TOKENS:-1024}"                           # output cap (input comes from dataset)
 NUM_RUNS="${NUM_RUNS:-2}"                                  # repeat-run count for prefix-cache warm-up
 
-# Real-data dataset for prefix-cache-on benchmark
-HF_DATASET="${HF_DATASET:-togethercomputer/tore-speed-eval-narrativeqa-100k}"
-HF_DATASET_LABEL="${HF_DATASET_LABEL:-nqa100k}"            # short label embedded in CSV filename
+# Real-data datasets for prefix-cache-on length-sweep benchmark.
+# Iterate over multiple input lengths in main(); HF_DATASET / HF_DATASET_LABEL
+# are set per iteration. (200k requires a locally built nqa-200k dataset and is
+# omitted here — see donglin_sglang/long_mode2_throughput_test.sh for that.)
+declare -A HF_DATASETS_BY_LABEL=(
+    [nqa30k]="togethercomputer/tore-speed-eval-narrativeqa-30k"
+    [nqa60k]="togethercomputer/tore-speed-eval-narrativeqa-60k"
+    [nqa100k]="togethercomputer/tore-speed-eval-narrativeqa-100k"
+)
+DATASET_ORDER=(nqa30k nqa60k nqa100k)
+HF_DATASET=""        # filled in main() per iteration
+HF_DATASET_LABEL=""  # filled in main() per iteration
 
 # Sampling parameters (applied to main eval)
 # Empty → auto-pick per-model-family defaults in benchmark_single_model:
@@ -68,7 +77,7 @@ TOP_P="${TOP_P:-}"
 #
 MODEL_CONFIGS=(
     # ---- INT4 fused kernel, hadamard=1 rotate_v=1 order=128 ----
-    # 4B / 8B parallel on GPU 2 / 3 (TP=1) -- already done, commented
+    # 4B / 8B parallel on GPU 2 / 3 (TP=1)
     # "1|QUANT|1|1|128|INT4|Qwen/Qwen3-4B-Thinking-2507|2|1|1|1"
     # "1|QUANT|1|1|128|INT4|Qwen/Qwen3-8B|3|1|1|1"
     "1|QUANT|1|1|128|INT4|zai-org/GLM-4.7-FP8|0,1,2,3,4,5,6,7|8|1|1"
@@ -77,7 +86,7 @@ MODEL_CONFIGS=(
 # =============================================================================
 # Server & Path Config
 # =============================================================================
-BASE_PORT=32100
+BASE_PORT=33100
 
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -658,20 +667,29 @@ fi
 
 echo ""
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] =========================================="
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] KV-cache Rotation Throughput Benchmark"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Long Mode-2 Length Sweep Benchmark (fused INT4)"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Configs:       ${#MODEL_CONFIGS[@]} entry(s)"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Batch sizes:   ${BATCH_SIZES[*]}"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Num examples:  ${NUM_EXAMPLES[*]}"
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] Dataset:       $HF_DATASET (label=$HF_DATASET_LABEL)"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] Datasets:      ${DATASET_ORDER[*]}"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] Max tokens:    $MAX_TOKENS  Num runs: $NUM_RUNS"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] GPU free threshold: ${GPU_FREE_MEM_MB} MB"
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] =========================================="
 echo ""
 
 OVERALL_EXIT=0
-declare -a PIDS
-declare -a EXIT_CODES
-declare -A CONFIG_LABELS
+
+# Outer loop: iterate over all input lengths (datasets); inner loop preserves
+# the original parallel-by-non-overlapping-GPUs scheduling for MODEL_CONFIGS.
+for HF_DATASET_LABEL in "${DATASET_ORDER[@]}"; do
+HF_DATASET="${HF_DATASETS_BY_LABEL[$HF_DATASET_LABEL]}"
+echo ""
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] >>>>> Dataset: $HF_DATASET_LABEL  ($HF_DATASET) <<<<<"
+echo ""
+
+declare -a PIDS=()
+declare -a EXIT_CODES=()
+declare -A CONFIG_LABELS=()
 N=${#MODEL_CONFIGS[@]}
 
 for i in "${!MODEL_CONFIGS[@]}"; do
@@ -752,7 +770,7 @@ for i in "${!MODEL_CONFIGS[@]}"; do
 done
 
 echo ""
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] All configs launched, waiting for completion..."
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] All configs launched for dataset $HF_DATASET_LABEL, waiting for completion..."
 echo ""
 
 for i in "${!PIDS[@]}"; do
@@ -761,13 +779,14 @@ for i in "${!PIDS[@]}"; do
         EXIT_CODES[$i]=$?
     fi
     if [ "${EXIT_CODES[$i]}" -eq 0 ]; then
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✓ ${CONFIG_LABELS[$i]}"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✓ [$HF_DATASET_LABEL] ${CONFIG_LABELS[$i]}"
     else
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✗ ${CONFIG_LABELS[$i]}"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] ✗ [$HF_DATASET_LABEL] ${CONFIG_LABELS[$i]}"
         OVERALL_EXIT=1
     fi
 done
+done  # end of dataset loop
 
 echo ""
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] All done. Exit: $OVERALL_EXIT"
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] All datasets done. Exit: $OVERALL_EXIT"
 exit $OVERALL_EXIT
