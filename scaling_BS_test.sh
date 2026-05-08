@@ -32,11 +32,13 @@ trap cleanup INT TERM
 # BATCH_SIZES=(1 8 16 32 256)
 # NUM_EXAMPLES=(4 32 32 32 256)                                  # paired 1:1 with BATCH_SIZES
 
-BATCH_SIZES=(1 8 16 32)
-NUM_EXAMPLES=(4 32 32 32)                                  # paired 1:1 with BATCH_SIZES
+# BATCH_SIZES=(1 4 8 16 32 64 96 128 192 256)
+# NUM_EXAMPLES=(4 32 32 32 32 64 96 128 192 256)             # paired 1:1 with BATCH_SIZES
+BATCH_SIZES=(256)
+NUM_EXAMPLES=(256)
 
 MAX_TOKENS="${MAX_TOKENS:-1024}"                           # output cap (input comes from dataset)
-NUM_RUNS="${NUM_RUNS:-2}"                                  # repeat-run count for prefix-cache warm-up
+NUM_RUNS="${NUM_RUNS:-1}"                                  # repeat-run count for prefix-cache warm-up (run1 only by default)
 
 # Real-data datasets for prefix-cache-on length-sweep benchmark.
 # Iterate over multiple input lengths in main(); HF_DATASET / HF_DATASET_LABEL
@@ -77,26 +79,31 @@ TOP_P="${TOP_P:-}"
 #   eval_dp       : data parallel size
 #
 MODEL_CONFIGS=(
-    # ---- INT4 fused kernel, hadamard=1 rotate_v=1 order=128 ----
-    # 4B / 8B parallel on GPU 2 / 3 (TP=1)
-    # "1|QUANT|1|1|128|INT4|Qwen/Qwen3-4B-Thinking-2507|2|1|1|1"
-    # "1|QUANT|1|1|128|INT4|Qwen/Qwen3-8B|3|1|1|1"
+    # ---- Saw-INT4 BS-scaling sweep on nqa100k (TP=1, parallel on GPU 6/7;
+    # leaves GPU 0-5 for the donglin_sglang/scaling_BS_test.sh run) ----
+    "1|QUANT|1|1|128|INT4|Qwen/Qwen3-4B-Thinking-2507|0|1|1|1"
+    # "1|QUANT|1|1|128|INT4|Qwen/Qwen3-8B|5|1|1|1"
+
+    # ---- GLM-4.7-FP8 (TP=8, all 8 GPUs; runs on a separate node) ----
     # "1|QUANT|1|1|128|INT4|zai-org/GLM-4.7-FP8|0,1,2,3,4,5,6,7|8|1|1"
-    "1|QUANT|1|1|128|INT4|Qwen/Qwen3-32B|0,1,2,3|4|1|1"
 )
 
 # =============================================================================
 # Server & Path Config
 # =============================================================================
-BASE_PORT=33200
+BASE_PORT=31300
 
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TORE_SPEED_EVAL_DIR="$SCRIPT_DIR/tore-speed-eval"
-RESULTS_DIR="${RESULTS_DIR:-/data/jisenli2/donglin_sglang/final_results_rerun/long_mode2}"
-LOGS_DIR="${LOGS_DIR:-/data/jisenli2/donglin_sglang/final_logs_rerun/long_mode2}"
+RESULTS_DIR="${RESULTS_DIR:-/data/jisenli2/donglin_sglang/final_results_rerun2/scale_bs}"
+LOGS_DIR="${LOGS_DIR:-/data/jisenli2/donglin_sglang/final_logs_rerun2/scale_bs}"
 
 export HF_HOME=/data/shared/huggingface
+# NFS on /data/shared lacks rpc.lockd → filelock release returns ENOLCK and
+# crashes the scheduler during weight load. Weights are already cached locally,
+# so disable the download/lock dance entirely.
+export HF_HUB_OFFLINE=1
 
 CONDA_BASE="/data/$USER/miniconda"
 CONDA_ENV_NAME="fused_sglang_env"
@@ -446,17 +453,10 @@ benchmark_single_model() {
     local overall_exit=0
 
     # ==================================================================
-    # Phase 0: noradix run0 — single long-lived server, sweep all BS once.
-    # Provides a "no-cache baseline" reference: each (model, dtype, BS) run0
-    # CSV measures throughput WITHOUT prefix-cache benefits.
+    # Phase 0: noradix run0 — DISABLED for the scaling-BS sweep. We only
+    # need the cache-warm runs (run1+run2) for this benchmark.
     # ==================================================================
     local need_phase0=0
-    for bs in "${BATCH_SIZES[@]}"; do
-        if [ ! -f "${result_dir}/bs${bs}_${HF_DATASET_LABEL}_run0.csv" ]; then
-            need_phase0=1
-            break
-        fi
-    done
 
     if [ "$need_phase0" -eq 1 ]; then
         local phase0_port=$((server_port + 1000))
